@@ -84,11 +84,12 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+              <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-              <!-- يسمح برؤية التطبيقات المثبتة (أندرويد 11+) -->
+              <!-- يسمح برؤية التطبيقات المثبتة (لعرض أيقونة التطبيق) -->
               <queries>
                   <intent>
                       <action android:name="android.intent.action.MAIN" />
@@ -114,19 +115,6 @@ jobs:
                   <service
                       android:name=".FloatingService"
                       android:exported="false" />
-
-                  <service
-                      android:name=".SplitService"
-                      android:exported="true"
-                      android:label="Float Launcher"
-                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-                      <intent-filter>
-                          <action android:name="android.accessibilityservice.AccessibilityService" />
-                      </intent-filter>
-                      <meta-data
-                          android:name="android.accessibilityservice"
-                          android:resource="@xml/accessibility_config" />
-                  </service>
               </application>
           </manifest>
           FILE_EOF
@@ -151,24 +139,6 @@ jobs:
                   android:pathData="M20,40h34a4,4 0 0 1 4,4v34a4,4 0 0 1 -4,4h-34a4,4 0 0 1 -4,-4v-34a4,4 0 0 1 4,-4z" />
           </vector>
           FILE_EOF
-          mkdir -p app/src/main/res/xml
-          cat > app/src/main/res/xml/accessibility_config.xml << 'FILE_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-              android:accessibilityEventTypes="typeWindowsChanged"
-              android:accessibilityFeedbackType="feedbackGeneric"
-              android:accessibilityFlags="flagRetrieveInteractiveWindows"
-              android:canRetrieveWindowContent="true"
-              android:description="@string/accessibility_desc"
-              android:notificationTimeout="200" />
-          FILE_EOF
-          mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/strings.xml << 'FILE_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <string name="accessibility_desc">تُستخدم فقط لتقسيم الشاشة وفتح التطبيق المختار بجانب اللعبة. لا يقرأ التطبيق أي نصوص أو بيانات.</string>
-          </resources>
-          FILE_EOF
           mkdir -p app/src/main/java/com/example/floatapp
           cat > app/src/main/java/com/example/floatapp/MainActivity.kt << 'FILE_EOF'
           package com.example.floatapp
@@ -188,9 +158,9 @@ jobs:
           class MainActivity : Activity() {
 
               private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE) }
-              private lateinit var appLabel: TextView
+              private lateinit var siteLabel: TextView
               private lateinit var sizeLabel: TextView
-              private lateinit var accStatus: TextView
+              private lateinit var winLabel: TextView
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -202,10 +172,10 @@ jobs:
                       gravity = Gravity.CENTER_HORIZONTAL
                   }
 
-                  appLabel = TextView(this).apply { textSize = 18f }
+                  siteLabel = TextView(this).apply { textSize = 18f }
                   val pickBtn = Button(this).apply {
-                      text = "اختر التطبيق"
-                      setOnClickListener { pickApp() }
+                      text = "اختر الموقع"
+                      setOnClickListener { pickSite() }
                   }
 
                   sizeLabel = TextView(this).apply { textSize = 16f }
@@ -224,12 +194,20 @@ jobs:
                       })
                   }
 
-                  accStatus = TextView(this).apply { textSize = 16f }
-                  val accBtn = Button(this).apply {
-                      text = "تفعيل خدمة تقسيم الشاشة"
-                      setOnClickListener {
-                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                      }
+                  winLabel = TextView(this).apply { textSize = 16f }
+                  val winSeek = SeekBar(this).apply {
+                      max = 70 // من 30% إلى 100% من عرض الشاشة
+                      progress = prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                              winLabel.text = "حجم النافذة: ${p + 30}% من عرض الشاشة"
+                              FloatingService.instance?.setWindowPercent(p + 30)
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar) {}
+                          override fun onStopTrackingTouch(s: SeekBar) {
+                              prefs.edit().putInt(FloatingService.KEY_WIN, s.progress + 30).apply()
+                          }
+                      })
                   }
 
                   val startBtn = Button(this).apply {
@@ -243,7 +221,7 @@ jobs:
                       }
                   }
 
-                  listOf(appLabel, pickBtn, sizeLabel, seek, accStatus, accBtn, startBtn, stopBtn).forEach {
+                  listOf(siteLabel, pickBtn, sizeLabel, seek, winLabel, winSeek, startBtn, stopBtn).forEach {
                       root.addView(it, LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.MATCH_PARENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
@@ -257,33 +235,20 @@ jobs:
                   }
               }
 
-              override fun onResume() {
-                  super.onResume()
-                  accStatus.text = if (SplitService.instance != null) "خدمة التقسيم: مفعّلة ✅" else "خدمة التقسيم: غير مفعّلة ❌"
-              }
-
               private fun refreshLabels() {
-                  val pkg = prefs.getString(FloatingService.KEY_PKG, FloatingService.DEFAULT_PKG)!!
-                  val name = try {
-                      packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
-                  } catch (e: Exception) { pkg }
-                  appLabel.text = "التطبيق: $name"
+                  val idx = prefs.getInt(FloatingService.KEY_SITE, 0).coerceIn(0, FloatingService.SITES.lastIndex)
+                  siteLabel.text = "الموقع: ${FloatingService.SITES[idx].first}"
                   sizeLabel.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
+                  winLabel.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من عرض الشاشة"
               }
 
-              private fun pickApp() {
-                  val pm = packageManager
-                  val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                  // نحمّل اسم كل تطبيق مرة واحدة فقط
-                  val apps = pm.queryIntentActivities(launcher, 0)
-                      .map { Pair(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
-                      .sortedBy { it.first.lowercase() }
+              private fun pickSite() {
                   AlertDialog.Builder(this)
-                      .setTitle("اختر التطبيق")
-                      .setItems(apps.map { it.first }.toTypedArray()) { _, i ->
-                          prefs.edit().putString(FloatingService.KEY_PKG, apps[i].second).apply()
+                      .setTitle("اختر الموقع")
+                      .setItems(FloatingService.SITES.map { it.first }.toTypedArray()) { _, i ->
+                          prefs.edit().putInt(FloatingService.KEY_SITE, i).apply()
                           refreshLabels()
-                          FloatingService.instance?.applyIcon()
+                          FloatingService.instance?.onSiteChanged()
                       }
                       .show()
               }
@@ -306,33 +271,64 @@ jobs:
           cat > app/src/main/java/com/example/floatapp/FloatingService.kt << 'FILE_EOF'
           package com.example.floatapp
 
+          import android.annotation.SuppressLint
           import android.app.*
           import android.content.Context
           import android.content.Intent
+          import android.graphics.Color
           import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
           import android.os.IBinder
           import android.view.*
+          import android.view.inputmethod.InputMethodManager
+          import android.webkit.CookieManager
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.FrameLayout
           import android.widget.ImageView
-          import android.widget.Toast
+          import android.widget.LinearLayout
+          import android.widget.TextView
           import kotlin.math.abs
 
           class FloatingService : Service() {
 
               companion object {
                   const val PREFS = "cfg"
-                  const val KEY_PKG = "pkg"
+                  const val KEY_SITE = "site"
                   const val KEY_SIZE = "size"
-                  const val DEFAULT_PKG = "com.instagram.android"
-                  const val DEFAULT_SIZE = 70 // dp
+                  const val KEY_WIN = "win"
+                  const val DEFAULT_SIZE = 70 // حجم الأيقونة dp
+                  const val DEFAULT_WIN = 70  // عرض النافذة % من الشاشة
 
-                  // مرجع مباشر للخدمة لتحديث الحجم/الأيقونة بدون إرسال Intents متكررة
+                  // الاسم، الرابط، حزمة التطبيق (لعرض أيقونته إن كان مثبتاً)
+                  val SITES = listOf(
+                      Triple("Instagram", "https://www.instagram.com/", "com.instagram.android"),
+                      Triple("Facebook", "https://m.facebook.com/", "com.facebook.katana"),
+                      Triple("YouTube", "https://m.youtube.com/", "com.google.android.youtube"),
+                      Triple("TikTok", "https://www.tiktok.com/", "com.zhiliaoapp.musically"),
+                      Triple("X (Twitter)", "https://mobile.twitter.com/", "com.twitter.android"),
+                      Triple("Telegram", "https://web.telegram.org/k/", "org.telegram.messenger")
+                  )
+
                   @Volatile
                   var instance: FloatingService? = null
               }
 
+              private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+              private val baseFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                      WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+
               private lateinit var wm: WindowManager
-              private lateinit var params: WindowManager.LayoutParams
+              private lateinit var bubbleParams: WindowManager.LayoutParams
               private var bubble: ImageView? = null
+
+              private var winParams: WindowManager.LayoutParams? = null
+              private var windowView: FrameLayout? = null
+              private var webView: WebView? = null
+              private var kbBtn: TextView? = null
+              private var attached = false
+              private var kbOn = false
 
               override fun onBind(intent: Intent?): IBinder? = null
 
@@ -348,6 +344,7 @@ jobs:
 
               private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun site() = SITES[prefs().getInt(KEY_SITE, 0).coerceIn(0, SITES.lastIndex)]
 
               private fun buildNotification(): Notification {
                   val channelId = "float_channel"
@@ -361,9 +358,46 @@ jobs:
                       .build()
               }
 
+              // ---------- سحب أي عنصر عائم (وإذا لم يُسحب يُعتبر ضغطة) ----------
+              @SuppressLint("ClickableViewAccessibility")
+              private fun attachDrag(
+                  target: View,
+                  p: WindowManager.LayoutParams,
+                  host: View,
+                  onTap: (() -> Unit)? = null
+              ) {
+                  var sx = 0
+                  var sy = 0
+                  var tx = 0f
+                  var ty = 0f
+                  var moved = false
+                  target.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              sx = p.x; sy = p.y
+                              tx = e.rawX; ty = e.rawY
+                              moved = false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = e.rawX - tx
+                              val dy = e.rawY - ty
+                              if (abs(dx) > 10 || abs(dy) > 10) moved = true
+                              if (moved) {
+                                  p.x = sx + dx.toInt()
+                                  p.y = sy + dy.toInt()
+                                  wm.updateViewLayout(host, p)
+                              }
+                          }
+                          MotionEvent.ACTION_UP -> if (!moved) onTap?.invoke()
+                      }
+                      true
+                  }
+              }
+
+              // ---------- الأيقونة العائمة ----------
               private fun createBubble() {
                   val size = dp(prefs().getInt(KEY_SIZE, DEFAULT_SIZE))
-                  params = WindowManager.LayoutParams(
+                  bubbleParams = WindowManager.LayoutParams(
                       size, size,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
@@ -373,152 +407,218 @@ jobs:
                       x = 20
                       y = 300
                   }
-
                   val view = ImageView(this).apply {
                       scaleType = ImageView.ScaleType.FIT_CENTER
                       alpha = 0.9f
                   }
-
-                  view.setOnTouchListener(object : View.OnTouchListener {
-                      var startX = 0
-                      var startY = 0
-                      var touchX = 0f
-                      var touchY = 0f
-                      var moved = false
-
-                      override fun onTouch(v: View, e: MotionEvent): Boolean {
-                          when (e.action) {
-                              MotionEvent.ACTION_DOWN -> {
-                                  startX = params.x; startY = params.y
-                                  touchX = e.rawX; touchY = e.rawY
-                                  moved = false
-                              }
-                              MotionEvent.ACTION_MOVE -> {
-                                  val dx = e.rawX - touchX
-                                  val dy = e.rawY - touchY
-                                  if (abs(dx) > 10 || abs(dy) > 10) moved = true
-                                  if (moved) {
-                                      params.x = startX + dx.toInt()
-                                      params.y = startY + dy.toInt()
-                                      wm.updateViewLayout(v, params)
-                                  }
-                              }
-                              MotionEvent.ACTION_UP -> if (!moved) launchTarget()
-                          }
-                          return true
-                      }
-                  })
-
+                  attachDrag(view, bubbleParams, view) { toggleWindow() }
                   bubble = view
-                  wm.addView(view, params)
+                  wm.addView(view, bubbleParams)
                   applyIcon()
               }
 
-              // تحديث الحجم فقط (خفيف جداً، يُستدعى أثناء تحريك الشريط)
               fun setSize(sizeDp: Int) {
                   val view = bubble ?: return
                   val px = dp(sizeDp)
-                  params.width = px
-                  params.height = px
-                  wm.updateViewLayout(view, params)
+                  bubbleParams.width = px
+                  bubbleParams.height = px
+                  wm.updateViewLayout(view, bubbleParams)
               }
 
-              // تحميل الأيقونة مرة واحدة فقط عند تغيير التطبيق
               fun applyIcon() {
                   val view = bubble ?: return
-                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
                   try {
-                      view.setImageDrawable(packageManager.getApplicationIcon(pkg))
+                      view.setImageDrawable(packageManager.getApplicationIcon(site().third))
                   } catch (e: Exception) {
-                      view.setImageResource(android.R.drawable.sym_def_app_icon)
+                      view.setImageResource(R.drawable.ic_launcher)
                   }
               }
 
-              private fun launchTarget() {
-                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
-                  val intent = packageManager.getLaunchIntentForPackage(pkg)
-                  if (intent == null) {
-                      Toast.makeText(this, "التطبيق غير مثبّت", Toast.LENGTH_SHORT).show()
-                      return
+              // عند تغيير الموقع من الإعدادات
+              fun onSiteChanged() {
+                  applyIcon()
+                  webView?.loadUrl(site().second)
+              }
+
+              // ---------- النافذة العائمة ----------
+              private fun windowSize(pct: Int): Pair<Int, Int> {
+                  val dm = resources.displayMetrics
+                  val w = (dm.widthPixels * pct / 100f).toInt()
+                  val h = minOf((w * 1.6f).toInt(), (dm.heightPixels * 0.85f).toInt())
+                  return Pair(w, h)
+              }
+
+              // تغيير حجم النافذة مباشرة من الشريط
+              fun setWindowPercent(pct: Int) {
+                  val p = winParams ?: return
+                  val v = windowView ?: return
+                  val (w, h) = windowSize(pct)
+                  p.width = w
+                  p.height = h
+                  if (attached) wm.updateViewLayout(v, p)
+              }
+
+              private fun toggleWindow() {
+                  when {
+                      windowView == null -> createWindow()
+                      attached -> hideWindow()
+                      else -> showWindow()
                   }
-                  val split = SplitService.instance
-                  if (split == null) {
-                      Toast.makeText(this, "فعّل خدمة «Float Launcher» من إعدادات إمكانية الوصول", Toast.LENGTH_LONG).show()
-                      return
+              }
+
+              @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
+              private fun createWindow() {
+                  val dm = resources.displayMetrics
+                  val (w, h) = windowSize(prefs().getInt(KEY_WIN, DEFAULT_WIN))
+                  val p = WindowManager.LayoutParams(
+                      w, h,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      baseFlags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = (dm.widthPixels - w) / 2
+                      y = (dm.heightPixels * 0.1f).toInt()
+                      softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
                   }
-                  split.openSplit(intent)
+
+                  val root = FrameLayout(this)
+                  root.background = GradientDrawable().apply {
+                      setColor(Color.BLACK)
+                      cornerRadius = dp(10).toFloat()
+                      setStroke(dp(1), 0xFF444444.toInt())
+                  }
+                  root.clipToOutline = true
+
+                  val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+                  // الشريط العلوي
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setBackgroundColor(0xFF1E1E1E.toInt())
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  fun headerBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
+                      text = label
+                      setTextColor(Color.WHITE)
+                      textSize = 17f
+                      gravity = Gravity.CENTER
+                      setPadding(dp(14), 0, dp(14), 0)
+                      setOnClickListener { onClick() }
+                  }
+                  header.addView(headerBtn("◀") { webView?.let { if (it.canGoBack()) it.goBack() } },
+                      LinearLayout.LayoutParams(WRAP, MATCH))
+                  val kb = headerBtn("⌨") { toggleKeyboard() }
+                  kbBtn = kb
+                  header.addView(kb, LinearLayout.LayoutParams(WRAP, MATCH))
+                  header.addView(View(this), LinearLayout.LayoutParams(0, MATCH, 1f)) // مساحة السحب
+                  header.addView(headerBtn("—") { hideWindow() }, LinearLayout.LayoutParams(WRAP, MATCH))
+                  header.addView(headerBtn("✕") { closeWindow() }, LinearLayout.LayoutParams(WRAP, MATCH))
+                  column.addView(header, LinearLayout.LayoutParams(MATCH, dp(38)))
+                  attachDrag(header, p, root)
+
+                  // المتصفح
+                  val web = WebView(this)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  web.settings.mediaPlaybackRequiresUserGesture = false
+                  web.settings.userAgentString = web.settings.userAgentString.replace("; wv", "")
+                  web.webViewClient = WebViewClient()
+                  web.loadUrl(site().second)
+                  column.addView(web, LinearLayout.LayoutParams(MATCH, 0, 1f))
+                  root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  // مقبض تغيير الحجم (الزاوية السفلية)
+                  val handle = TextView(this).apply {
+                      text = "◢"
+                      setTextColor(Color.WHITE)
+                      textSize = 20f
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(0x66000000)
+                  }
+                  root.addView(handle, FrameLayout.LayoutParams(dp(38), dp(38), Gravity.BOTTOM or Gravity.END))
+                  var rw = 0
+                  var rh = 0
+                  var tx = 0f
+                  var ty = 0f
+                  handle.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              rw = p.width; rh = p.height
+                              tx = e.rawX; ty = e.rawY
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              p.width = (rw + (e.rawX - tx)).toInt().coerceIn(dp(200), dm.widthPixels)
+                              p.height = (rh + (e.rawY - ty)).toInt().coerceIn(dp(250), dm.heightPixels)
+                              wm.updateViewLayout(root, p)
+                          }
+                      }
+                      true
+                  }
+
+                  winParams = p
+                  windowView = root
+                  webView = web
+                  wm.addView(root, p)
+                  attached = true
+              }
+
+              private fun hideWindow() {
+                  val v = windowView ?: return
+                  if (kbOn) toggleKeyboard()
+                  if (attached) wm.removeView(v)
+                  attached = false
+                  webView?.onPause()
+              }
+
+              private fun showWindow() {
+                  val v = windowView ?: return
+                  val p = winParams ?: return
+                  if (!attached) wm.addView(v, p)
+                  attached = true
+                  webView?.onResume()
+              }
+
+              // إغلاق كامل وتحرير ذاكرة المتصفح
+              private fun closeWindow() {
+                  val v = windowView ?: return
+                  if (attached) wm.removeView(v)
+                  attached = false
+                  v.removeAllViews()
+                  webView?.apply {
+                      stopLoading()
+                      destroy()
+                  }
+                  webView = null
+                  windowView = null
+                  winParams = null
+                  kbBtn = null
+                  kbOn = false
+                  CookieManager.getInstance().flush()
+              }
+
+              // زر لوحة المفاتيح: يجعل النافذة قابلة للكتابة (قد توقف اللعبة مؤقتاً أثناء الكتابة)
+              private fun toggleKeyboard() {
+                  val v = windowView ?: return
+                  val p = winParams ?: return
+                  kbOn = !kbOn
+                  p.flags = if (kbOn) baseFlags else baseFlags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                  if (attached) wm.updateViewLayout(v, p)
+                  kbBtn?.setTextColor(if (kbOn) 0xFF4CAF50.toInt() else Color.WHITE)
+                  if (kbOn) {
+                      webView?.requestFocus()
+                  } else {
+                      val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                      imm.hideSoftInputFromWindow(v.windowToken, 0)
+                  }
               }
 
               override fun onDestroy() {
+                  closeWindow()
                   bubble?.let { wm.removeView(it) }
                   bubble = null
                   instance = null
                   super.onDestroy()
-              }
-          }
-          FILE_EOF
-          mkdir -p app/src/main/java/com/example/floatapp
-          cat > app/src/main/java/com/example/floatapp/SplitService.kt << 'FILE_EOF'
-          package com.example.floatapp
-
-          import android.accessibilityservice.AccessibilityService
-          import android.content.Intent
-          import android.os.Handler
-          import android.os.Looper
-          import android.view.accessibility.AccessibilityEvent
-          import android.view.accessibility.AccessibilityWindowInfo
-
-          // خدمة إمكانية الوصول: تنفّذ "تقسيم الشاشة" ثم تفتح التطبيق في النصف الآخر
-          class SplitService : AccessibilityService() {
-
-              companion object {
-                  @Volatile
-                  var instance: SplitService? = null
-              }
-
-              private val handler = Handler(Looper.getMainLooper())
-
-              override fun onServiceConnected() {
-                  instance = this
-              }
-
-              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-
-              override fun onInterrupt() {}
-
-              override fun onUnbind(intent: Intent?): Boolean {
-                  instance = null
-                  return super.onUnbind(intent)
-              }
-
-              override fun onDestroy() {
-                  instance = null
-                  super.onDestroy()
-              }
-
-              // هل الشاشة مقسّمة حالياً؟ (يوجد فاصل التقسيم بين النافذتين)
-              private fun isSplit(): Boolean =
-                  try {
-                      windows.any { it.type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER }
-                  } catch (e: Exception) {
-                      false
-                  }
-
-              fun openSplit(intent: Intent) {
-                  if (isSplit()) {
-                      launchAdjacent(intent)
-                  } else {
-                      // اللعبة (التطبيق الحالي) تذهب للنصف الأول
-                      performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
-                      handler.postDelayed({ launchAdjacent(intent) }, 800)
-                  }
-              }
-
-              private fun launchAdjacent(intent: Intent) {
-                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
-                  try {
-                      startActivity(intent)
-                  } catch (e: Exception) { }
               }
           }
           FILE_EOF
