@@ -101,7 +101,7 @@ jobs:
                   android:allowBackup="false"
                   android:icon="@drawable/ic_launcher"
                   android:label="Float Launcher"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:theme="@android:style/Theme.Material.NoActionBar">
 
                   <activity
                       android:name=".MainActivity"
@@ -278,10 +278,12 @@ jobs:
           import android.graphics.Color
           import android.graphics.PixelFormat
           import android.graphics.drawable.GradientDrawable
+          import android.os.Build
           import android.os.IBinder
           import android.view.*
           import android.view.inputmethod.InputMethodManager
           import android.webkit.CookieManager
+          import android.webkit.WebSettings
           import android.webkit.WebView
           import android.webkit.WebViewClient
           import android.widget.FrameLayout
@@ -319,9 +321,13 @@ jobs:
               private val baseFlags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                       WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
 
+              // عرض الصفحة المنطقي ثابت (كأنها شاشة هاتف)، ثم تُصغَّر لتناسب النافذة
+              private val BASE_WIDTH_DP = 400
+
               private lateinit var wm: WindowManager
               private lateinit var bubbleParams: WindowManager.LayoutParams
               private var bubble: ImageView? = null
+              private var bubbleAttached = false
 
               private var winParams: WindowManager.LayoutParams? = null
               private var windowView: FrameLayout? = null
@@ -413,8 +419,25 @@ jobs:
                   }
                   attachDrag(view, bubbleParams, view) { toggleWindow() }
                   bubble = view
-                  wm.addView(view, bubbleParams)
+                  showBubble()
                   applyIcon()
+              }
+
+              // الأيقونة تختفي عند فتح النافذة وتعود عند إخفائها أو إغلاقها
+              private fun showBubble() {
+                  val v = bubble ?: return
+                  if (!bubbleAttached) {
+                      wm.addView(v, bubbleParams)
+                      bubbleAttached = true
+                  }
+              }
+
+              private fun hideBubble() {
+                  val v = bubble ?: return
+                  if (bubbleAttached) {
+                      wm.removeView(v)
+                      bubbleAttached = false
+                  }
               }
 
               fun setSize(sizeDp: Int) {
@@ -422,7 +445,7 @@ jobs:
                   val px = dp(sizeDp)
                   bubbleParams.width = px
                   bubbleParams.height = px
-                  wm.updateViewLayout(view, bubbleParams)
+                  if (bubbleAttached) wm.updateViewLayout(view, bubbleParams)
               }
 
               fun applyIcon() {
@@ -463,6 +486,33 @@ jobs:
                       windowView == null -> createWindow()
                       attached -> hideWindow()
                       else -> showWindow()
+                  }
+              }
+
+              // ضبط حجم الصفحة ليتناسب مع النافذة: تُعرض بعرض ثابت ثم تُصغَّر/تُكبَّر
+              private fun fitWeb(web: WebView, cw: Int, ch: Int) {
+                  if (cw <= 0 || ch <= 0) return
+                  val baseW = dp(BASE_WIDTH_DP)
+                  val scale = cw.toFloat() / baseW
+                  val newH = (ch / scale).toInt()
+                  val lp = web.layoutParams
+                  if (lp.width != baseW || lp.height != newH) {
+                      lp.width = baseW
+                      lp.height = newH
+                      web.layoutParams = lp
+                  }
+                  web.pivotX = 0f
+                  web.pivotY = 0f
+                  web.scaleX = scale
+                  web.scaleY = scale
+              }
+
+              @Suppress("DEPRECATION")
+              private fun enableDark(s: WebSettings) {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      s.isAlgorithmicDarkeningAllowed = true
+                  } else if (Build.VERSION.SDK_INT >= 29) {
+                      s.forceDark = WebSettings.FORCE_DARK_ON
                   }
               }
 
@@ -517,15 +567,24 @@ jobs:
                   column.addView(header, LinearLayout.LayoutParams(MATCH, dp(38)))
                   attachDrag(header, p, root)
 
-                  // المتصفح
+                  // المتصفح (خلفية سوداء + وضع داكن للمواقع)
                   val web = WebView(this)
+                  web.setBackgroundColor(Color.BLACK)
                   web.settings.javaScriptEnabled = true
                   web.settings.domStorageEnabled = true
                   web.settings.mediaPlaybackRequiresUserGesture = false
                   web.settings.userAgentString = web.settings.userAgentString.replace("; wv", "")
+                  enableDark(web.settings)
                   web.webViewClient = WebViewClient()
                   web.loadUrl(site().second)
-                  column.addView(web, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+                  val container = FrameLayout(this)
+                  container.setBackgroundColor(Color.BLACK)
+                  container.addView(web, FrameLayout.LayoutParams(dp(BASE_WIDTH_DP), 1))
+                  container.addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
+                      fitWeb(web, r - l, b - t)
+                  }
+                  column.addView(container, LinearLayout.LayoutParams(MATCH, 0, 1f))
                   root.addView(column, FrameLayout.LayoutParams(MATCH, MATCH))
 
                   // مقبض تغيير الحجم (الزاوية السفلية)
@@ -548,8 +607,8 @@ jobs:
                               tx = e.rawX; ty = e.rawY
                           }
                           MotionEvent.ACTION_MOVE -> {
-                              p.width = (rw + (e.rawX - tx)).toInt().coerceIn(dp(200), dm.widthPixels)
-                              p.height = (rh + (e.rawY - ty)).toInt().coerceIn(dp(250), dm.heightPixels)
+                              p.width = (rw + (e.rawX - tx)).toInt().coerceIn(dp(160), dm.widthPixels)
+                              p.height = (rh + (e.rawY - ty)).toInt().coerceIn(dp(200), dm.heightPixels)
                               wm.updateViewLayout(root, p)
                           }
                       }
@@ -561,6 +620,7 @@ jobs:
                   webView = web
                   wm.addView(root, p)
                   attached = true
+                  hideBubble()
               }
 
               private fun hideWindow() {
@@ -569,6 +629,7 @@ jobs:
                   if (attached) wm.removeView(v)
                   attached = false
                   webView?.onPause()
+                  showBubble()
               }
 
               private fun showWindow() {
@@ -577,6 +638,7 @@ jobs:
                   if (!attached) wm.addView(v, p)
                   attached = true
                   webView?.onResume()
+                  hideBubble()
               }
 
               // إغلاق كامل وتحرير ذاكرة المتصفح
@@ -595,6 +657,7 @@ jobs:
                   kbBtn = null
                   kbOn = false
                   CookieManager.getInstance().flush()
+                  showBubble()
               }
 
               // زر لوحة المفاتيح: يجعل النافذة قابلة للكتابة (قد توقف اللعبة مؤقتاً أثناء الكتابة)
@@ -615,7 +678,7 @@ jobs:
 
               override fun onDestroy() {
                   closeWindow()
-                  bubble?.let { wm.removeView(it) }
+                  hideBubble()
                   bubble = null
                   instance = null
                   super.onDestroy()
