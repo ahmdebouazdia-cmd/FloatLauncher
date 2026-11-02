@@ -1,0 +1,442 @@
+name: Build APK (all-in-one)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate project files
+        run: |
+          cat > settings.gradle << 'FILE_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FloatLauncher"
+          include ':app'
+          FILE_EOF
+          cat > build.gradle << 'FILE_EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          FILE_EOF
+          cat > gradle.properties << 'FILE_EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          FILE_EOF
+          mkdir -p app
+          cat > app/build.gradle << 'FILE_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.floatapp'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.example.floatapp'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled true
+                      shrinkResources true
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+                      signingConfig signingConfigs.debug
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          FILE_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml << 'FILE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <!-- يسمح برؤية التطبيقات المثبتة (أندرويد 11+) -->
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Float Launcher"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".FloatingService"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          FILE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher.xml << 'FILE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="96dp"
+              android:height="96dp"
+              android:viewportWidth="96"
+              android:viewportHeight="96">
+              <path
+                  android:fillColor="#0F1729"
+                  android:pathData="M20,0h56a20,20 0 0 1 20,20v56a20,20 0 0 1 -20,20h-56a20,20 0 0 1 -20,-20v-56a20,20 0 0 1 20,-20z" />
+              <path
+                  android:fillColor="#D29BFF"
+                  android:pathData="M40,20h34a4,4 0 0 1 4,4v34a4,4 0 0 1 -4,4h-34a4,4 0 0 1 -4,-4v-34a4,4 0 0 1 4,-4z" />
+              <path
+                  android:fillColor="#FFA81F"
+                  android:pathData="M30,30h34a4,4 0 0 1 4,4v34a4,4 0 0 1 -4,4h-34a4,4 0 0 1 -4,-4v-34a4,4 0 0 1 4,-4z" />
+              <path
+                  android:fillColor="#19D3FF"
+                  android:pathData="M20,40h34a4,4 0 0 1 4,4v34a4,4 0 0 1 -4,4h-34a4,4 0 0 1 -4,-4v-34a4,4 0 0 1 4,-4z" />
+          </vector>
+          FILE_EOF
+          mkdir -p app/src/main/java/com/example/floatapp
+          cat > app/src/main/java/com/example/floatapp/MainActivity.kt << 'FILE_EOF'
+          package com.example.floatapp
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.*
+
+          class MainActivity : Activity() {
+
+              private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE) }
+              private lateinit var appLabel: TextView
+              private lateinit var sizeLabel: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val pad = (20 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(pad, pad * 2, pad, pad)
+                      gravity = Gravity.CENTER_HORIZONTAL
+                  }
+
+                  appLabel = TextView(this).apply { textSize = 18f }
+                  val pickBtn = Button(this).apply {
+                      text = "اختر التطبيق"
+                      setOnClickListener { pickApp() }
+                  }
+
+                  sizeLabel = TextView(this).apply { textSize = 16f }
+                  val seek = SeekBar(this).apply {
+                      max = 110 // من 40 إلى 150 dp
+                      progress = prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE) - 40
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                              sizeLabel.text = "حجم الأيقونة: ${p + 40} dp"
+                              FloatingService.instance?.setSize(p + 40)
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar) {}
+                          override fun onStopTrackingTouch(s: SeekBar) {
+                              prefs.edit().putInt(FloatingService.KEY_SIZE, s.progress + 40).apply()
+                          }
+                      })
+                  }
+
+                  val startBtn = Button(this).apply {
+                      text = "تشغيل الأيقونة العائمة"
+                      setOnClickListener { startFloating() }
+                  }
+                  val stopBtn = Button(this).apply {
+                      text = "إيقاف"
+                      setOnClickListener {
+                          stopService(Intent(this@MainActivity, FloatingService::class.java))
+                      }
+                  }
+
+                  listOf(appLabel, pickBtn, sizeLabel, seek, startBtn, stopBtn).forEach {
+                      root.addView(it, LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      ).apply { topMargin = pad / 2 })
+                  }
+                  setContentView(root)
+                  refreshLabels()
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  }
+              }
+
+              private fun refreshLabels() {
+                  val pkg = prefs.getString(FloatingService.KEY_PKG, FloatingService.DEFAULT_PKG)!!
+                  val name = try {
+                      packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+                  } catch (e: Exception) { pkg }
+                  appLabel.text = "التطبيق: $name"
+                  sizeLabel.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
+              }
+
+              private fun pickApp() {
+                  val pm = packageManager
+                  val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  // نحمّل اسم كل تطبيق مرة واحدة فقط
+                  val apps = pm.queryIntentActivities(launcher, 0)
+                      .map { Pair(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
+                      .sortedBy { it.first.lowercase() }
+                  AlertDialog.Builder(this)
+                      .setTitle("اختر التطبيق")
+                      .setItems(apps.map { it.first }.toTypedArray()) { _, i ->
+                          prefs.edit().putString(FloatingService.KEY_PKG, apps[i].second).apply()
+                          refreshLabels()
+                          FloatingService.instance?.applyIcon()
+                      }
+                      .show()
+              }
+
+              private fun startFloating() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "فعّل «العرض فوق التطبيقات الأخرى» ثم ارجع", Toast.LENGTH_LONG).show()
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                      return
+                  }
+                  if (FloatingService.instance == null) {
+                      startForegroundService(Intent(this, FloatingService::class.java))
+                  }
+              }
+          }
+          FILE_EOF
+          mkdir -p app/src/main/java/com/example/floatapp
+          cat > app/src/main/java/com/example/floatapp/FloatingService.kt << 'FILE_EOF'
+          package com.example.floatapp
+
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.PixelFormat
+          import android.graphics.Rect
+          import android.os.IBinder
+          import android.view.*
+          import android.widget.ImageView
+          import android.widget.Toast
+          import kotlin.math.abs
+
+          class FloatingService : Service() {
+
+              companion object {
+                  const val PREFS = "cfg"
+                  const val KEY_PKG = "pkg"
+                  const val KEY_SIZE = "size"
+                  const val DEFAULT_PKG = "com.instagram.android"
+                  const val DEFAULT_SIZE = 70 // dp
+
+                  // مرجع مباشر للخدمة لتحديث الحجم/الأيقونة بدون إرسال Intents متكررة
+                  @Volatile
+                  var instance: FloatingService? = null
+              }
+
+              private lateinit var wm: WindowManager
+              private lateinit var params: WindowManager.LayoutParams
+              private var bubble: ImageView? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  instance = this
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  startForeground(1, buildNotification())
+                  createBubble()
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+              private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun buildNotification(): Notification {
+                  val channelId = "float_channel"
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(
+                      NotificationChannel(channelId, "Float Launcher", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  return Notification.Builder(this, channelId)
+                      .setContentTitle("الأيقونة العائمة تعمل")
+                      .setSmallIcon(android.R.drawable.ic_menu_view)
+                      .build()
+              }
+
+              private fun createBubble() {
+                  val size = dp(prefs().getInt(KEY_SIZE, DEFAULT_SIZE))
+                  params = WindowManager.LayoutParams(
+                      size, size,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = 20
+                      y = 300
+                  }
+
+                  val view = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.FIT_CENTER
+                      alpha = 0.9f
+                  }
+
+                  view.setOnTouchListener(object : View.OnTouchListener {
+                      var startX = 0
+                      var startY = 0
+                      var touchX = 0f
+                      var touchY = 0f
+                      var moved = false
+
+                      override fun onTouch(v: View, e: MotionEvent): Boolean {
+                          when (e.action) {
+                              MotionEvent.ACTION_DOWN -> {
+                                  startX = params.x; startY = params.y
+                                  touchX = e.rawX; touchY = e.rawY
+                                  moved = false
+                              }
+                              MotionEvent.ACTION_MOVE -> {
+                                  val dx = e.rawX - touchX
+                                  val dy = e.rawY - touchY
+                                  if (abs(dx) > 10 || abs(dy) > 10) moved = true
+                                  if (moved) {
+                                      params.x = startX + dx.toInt()
+                                      params.y = startY + dy.toInt()
+                                      wm.updateViewLayout(v, params)
+                                  }
+                              }
+                              MotionEvent.ACTION_UP -> if (!moved) launchTarget()
+                          }
+                          return true
+                      }
+                  })
+
+                  bubble = view
+                  wm.addView(view, params)
+                  applyIcon()
+              }
+
+              // تحديث الحجم فقط (خفيف جداً، يُستدعى أثناء تحريك الشريط)
+              fun setSize(sizeDp: Int) {
+                  val view = bubble ?: return
+                  val px = dp(sizeDp)
+                  params.width = px
+                  params.height = px
+                  wm.updateViewLayout(view, params)
+              }
+
+              // تحميل الأيقونة مرة واحدة فقط عند تغيير التطبيق
+              fun applyIcon() {
+                  val view = bubble ?: return
+                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
+                  try {
+                      view.setImageDrawable(packageManager.getApplicationIcon(pkg))
+                  } catch (e: Exception) {
+                      view.setImageResource(android.R.drawable.sym_def_app_icon)
+                  }
+              }
+
+              private fun launchTarget() {
+                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
+                  val intent = packageManager.getLaunchIntentForPackage(pkg)
+                  if (intent == null) {
+                      Toast.makeText(this, "التطبيق غير مثبّت", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+                  // نافذة حرة صغيرة (تعمل فقط إذا كان وضع Freeform مفعّلاً)
+                  val dm = resources.displayMetrics
+                  val w = (dm.widthPixels * 0.85).toInt()
+                  val h = (dm.heightPixels * 0.6).toInt()
+                  val left = (dm.widthPixels - w) / 2
+                  val top = (dm.heightPixels - h) / 2
+                  val options = ActivityOptions.makeBasic()
+                  options.setLaunchBounds(Rect(left, top, left + w, top + h))
+
+                  try {
+                      startActivity(intent, options.toBundle())
+                  } catch (e: Exception) {
+                      startActivity(intent)
+                  }
+              }
+
+              override fun onDestroy() {
+                  bubble?.let { wm.removeView(it) }
+                  bubble = null
+                  instance = null
+                  super.onDestroy()
+              }
+          }
+          FILE_EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.2'
+
+      - name: Build release APK
+        run: gradle assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FloatLauncher-APK
+          path: app/build/outputs/apk/release/app-release.apk
