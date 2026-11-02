@@ -114,6 +114,19 @@ jobs:
                   <service
                       android:name=".FloatingService"
                       android:exported="false" />
+
+                  <service
+                      android:name=".SplitService"
+                      android:exported="true"
+                      android:label="Float Launcher"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
               </application>
           </manifest>
           FILE_EOF
@@ -138,6 +151,24 @@ jobs:
                   android:pathData="M20,40h34a4,4 0 0 1 4,4v34a4,4 0 0 1 -4,4h-34a4,4 0 0 1 -4,-4v-34a4,4 0 0 1 4,-4z" />
           </vector>
           FILE_EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_config.xml << 'FILE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowsChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/accessibility_desc"
+              android:notificationTimeout="200" />
+          FILE_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml << 'FILE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="accessibility_desc">تُستخدم فقط لتقسيم الشاشة وفتح التطبيق المختار بجانب اللعبة. لا يقرأ التطبيق أي نصوص أو بيانات.</string>
+          </resources>
+          FILE_EOF
           mkdir -p app/src/main/java/com/example/floatapp
           cat > app/src/main/java/com/example/floatapp/MainActivity.kt << 'FILE_EOF'
           package com.example.floatapp
@@ -159,7 +190,7 @@ jobs:
               private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE) }
               private lateinit var appLabel: TextView
               private lateinit var sizeLabel: TextView
-              private lateinit var winLabel: TextView
+              private lateinit var accStatus: TextView
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -193,19 +224,12 @@ jobs:
                       })
                   }
 
-                  winLabel = TextView(this).apply { textSize = 16f }
-                  val winSeek = SeekBar(this).apply {
-                      max = 70 // من 30% إلى 100% من الشاشة
-                      progress = prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
-                              winLabel.text = "حجم النافذة: ${p + 30}% من الشاشة"
-                          }
-                          override fun onStartTrackingTouch(s: SeekBar) {}
-                          override fun onStopTrackingTouch(s: SeekBar) {
-                              prefs.edit().putInt(FloatingService.KEY_WIN, s.progress + 30).apply()
-                          }
-                      })
+                  accStatus = TextView(this).apply { textSize = 16f }
+                  val accBtn = Button(this).apply {
+                      text = "تفعيل خدمة تقسيم الشاشة"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
                   }
 
                   val startBtn = Button(this).apply {
@@ -219,7 +243,7 @@ jobs:
                       }
                   }
 
-                  listOf(appLabel, pickBtn, sizeLabel, seek, winLabel, winSeek, startBtn, stopBtn).forEach {
+                  listOf(appLabel, pickBtn, sizeLabel, seek, accStatus, accBtn, startBtn, stopBtn).forEach {
                       root.addView(it, LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.MATCH_PARENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
@@ -233,6 +257,11 @@ jobs:
                   }
               }
 
+              override fun onResume() {
+                  super.onResume()
+                  accStatus.text = if (SplitService.instance != null) "خدمة التقسيم: مفعّلة ✅" else "خدمة التقسيم: غير مفعّلة ❌"
+              }
+
               private fun refreshLabels() {
                   val pkg = prefs.getString(FloatingService.KEY_PKG, FloatingService.DEFAULT_PKG)!!
                   val name = try {
@@ -240,7 +269,6 @@ jobs:
                   } catch (e: Exception) { pkg }
                   appLabel.text = "التطبيق: $name"
                   sizeLabel.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
-                  winLabel.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من الشاشة"
               }
 
               private fun pickApp() {
@@ -282,7 +310,6 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.graphics.PixelFormat
-          import android.graphics.Rect
           import android.os.IBinder
           import android.view.*
           import android.widget.ImageView
@@ -297,8 +324,6 @@ jobs:
                   const val KEY_SIZE = "size"
                   const val DEFAULT_PKG = "com.instagram.android"
                   const val DEFAULT_SIZE = 70 // dp
-                  const val KEY_WIN = "win"      // حجم النافذة كنسبة مئوية من الشاشة
-                  const val DEFAULT_WIN = 60
 
                   // مرجع مباشر للخدمة لتحديث الحجم/الأيقونة بدون إرسال Intents متكررة
                   @Volatile
@@ -416,29 +441,12 @@ jobs:
                       Toast.makeText(this, "التطبيق غير مثبّت", Toast.LENGTH_SHORT).show()
                       return
                   }
-                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-                  // نافذة حرة بحجم تختاره (نسبة من الشاشة)، تعمل فقط إذا كان وضع Freeform مدعوماً
-                  val dm = resources.displayMetrics
-                  val pct = prefs().getInt(KEY_WIN, DEFAULT_WIN) / 100f
-                  val w = (dm.widthPixels * pct).toInt()
-                  val h = (dm.heightPixels * pct).toInt()
-                  val left = (dm.widthPixels - w) / 2
-                  val top = ((dm.heightPixels - h) * 0.15f).toInt()
-                  val options = ActivityOptions.makeBasic()
-                  options.setLaunchBounds(Rect(left, top, left + w, top + h))
-                  // محاولة إضافية لفرض وضع النافذة الحرة (قد لا تتوفر في بعض الأنظمة)
-                  try {
-                      ActivityOptions::class.java
-                          .getMethod("setLaunchWindowingMode", Int::class.javaPrimitiveType)
-                          .invoke(options, 5)
-                  } catch (e: Throwable) { }
-
-                  try {
-                      startActivity(intent, options.toBundle())
-                  } catch (e: Exception) {
-                      startActivity(intent)
+                  val split = SplitService.instance
+                  if (split == null) {
+                      Toast.makeText(this, "فعّل خدمة «Float Launcher» من إعدادات إمكانية الوصول", Toast.LENGTH_LONG).show()
+                      return
                   }
+                  split.openSplit(intent)
               }
 
               override fun onDestroy() {
@@ -446,6 +454,71 @@ jobs:
                   bubble = null
                   instance = null
                   super.onDestroy()
+              }
+          }
+          FILE_EOF
+          mkdir -p app/src/main/java/com/example/floatapp
+          cat > app/src/main/java/com/example/floatapp/SplitService.kt << 'FILE_EOF'
+          package com.example.floatapp
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityWindowInfo
+
+          // خدمة إمكانية الوصول: تنفّذ "تقسيم الشاشة" ثم تفتح التطبيق في النصف الآخر
+          class SplitService : AccessibilityService() {
+
+              companion object {
+                  @Volatile
+                  var instance: SplitService? = null
+              }
+
+              private val handler = Handler(Looper.getMainLooper())
+
+              override fun onServiceConnected() {
+                  instance = this
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onDestroy() {
+                  instance = null
+                  super.onDestroy()
+              }
+
+              // هل الشاشة مقسّمة حالياً؟ (يوجد فاصل التقسيم بين النافذتين)
+              private fun isSplit(): Boolean =
+                  try {
+                      windows.any { it.type == AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER }
+                  } catch (e: Exception) {
+                      false
+                  }
+
+              fun openSplit(intent: Intent) {
+                  if (isSplit()) {
+                      launchAdjacent(intent)
+                  } else {
+                      // اللعبة (التطبيق الحالي) تذهب للنصف الأول
+                      performGlobalAction(GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN)
+                      handler.postDelayed({ launchAdjacent(intent) }, 800)
+                  }
+              }
+
+              private fun launchAdjacent(intent: Intent) {
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT)
+                  try {
+                      startActivity(intent)
+                  } catch (e: Exception) { }
               }
           }
           FILE_EOF
