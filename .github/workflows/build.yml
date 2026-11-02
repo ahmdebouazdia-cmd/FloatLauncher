@@ -159,6 +159,7 @@ jobs:
               private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE) }
               private lateinit var appLabel: TextView
               private lateinit var sizeLabel: TextView
+              private lateinit var winLabel: TextView
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -192,6 +193,21 @@ jobs:
                       })
                   }
 
+                  winLabel = TextView(this).apply { textSize = 16f }
+                  val winSeek = SeekBar(this).apply {
+                      max = 70 // من 30% إلى 100% من الشاشة
+                      progress = prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                              winLabel.text = "حجم النافذة: ${p + 30}% من الشاشة"
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar) {}
+                          override fun onStopTrackingTouch(s: SeekBar) {
+                              prefs.edit().putInt(FloatingService.KEY_WIN, s.progress + 30).apply()
+                          }
+                      })
+                  }
+
                   val startBtn = Button(this).apply {
                       text = "تشغيل الأيقونة العائمة"
                       setOnClickListener { startFloating() }
@@ -203,7 +219,7 @@ jobs:
                       }
                   }
 
-                  listOf(appLabel, pickBtn, sizeLabel, seek, startBtn, stopBtn).forEach {
+                  listOf(appLabel, pickBtn, sizeLabel, seek, winLabel, winSeek, startBtn, stopBtn).forEach {
                       root.addView(it, LinearLayout.LayoutParams(
                           LinearLayout.LayoutParams.MATCH_PARENT,
                           LinearLayout.LayoutParams.WRAP_CONTENT
@@ -224,6 +240,7 @@ jobs:
                   } catch (e: Exception) { pkg }
                   appLabel.text = "التطبيق: $name"
                   sizeLabel.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
+                  winLabel.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من الشاشة"
               }
 
               private fun pickApp() {
@@ -280,6 +297,8 @@ jobs:
                   const val KEY_SIZE = "size"
                   const val DEFAULT_PKG = "com.instagram.android"
                   const val DEFAULT_SIZE = 70 // dp
+                  const val KEY_WIN = "win"      // حجم النافذة كنسبة مئوية من الشاشة
+                  const val DEFAULT_WIN = 60
 
                   // مرجع مباشر للخدمة لتحديث الحجم/الأيقونة بدون إرسال Intents متكررة
                   @Volatile
@@ -399,14 +418,21 @@ jobs:
                   }
                   intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-                  // نافذة حرة صغيرة (تعمل فقط إذا كان وضع Freeform مفعّلاً)
+                  // نافذة حرة بحجم تختاره (نسبة من الشاشة)، تعمل فقط إذا كان وضع Freeform مدعوماً
                   val dm = resources.displayMetrics
-                  val w = (dm.widthPixels * 0.85).toInt()
-                  val h = (dm.heightPixels * 0.6).toInt()
+                  val pct = prefs().getInt(KEY_WIN, DEFAULT_WIN) / 100f
+                  val w = (dm.widthPixels * pct).toInt()
+                  val h = (dm.heightPixels * pct).toInt()
                   val left = (dm.widthPixels - w) / 2
-                  val top = (dm.heightPixels - h) / 2
+                  val top = ((dm.heightPixels - h) * 0.15f).toInt()
                   val options = ActivityOptions.makeBasic()
                   options.setLaunchBounds(Rect(left, top, left + w, top + h))
+                  // محاولة إضافية لفرض وضع النافذة الحرة (قد لا تتوفر في بعض الأنظمة)
+                  try {
+                      ActivityOptions::class.java
+                          .getMethod("setLaunchWindowingMode", Int::class.javaPrimitiveType)
+                          .invoke(options, 5)
+                  } catch (e: Throwable) { }
 
                   try {
                       startActivity(intent, options.toBundle())
