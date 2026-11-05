@@ -1,4 +1,4 @@
-# FloatLaunchername: Build APK (all-in-one)
+name: Build APK (all-in-one)
 
 on:
   push:
@@ -84,11 +84,12 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+              <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-              <!-- يسمح برؤية التطبيقات المثبتة (أندرويد 11+) -->
+              <!-- يسمح برؤية التطبيقات المثبتة (لعرض أيقونة التطبيق) -->
               <queries>
                   <intent>
                       <action android:name="android.intent.action.MAIN" />
@@ -98,9 +99,10 @@ jobs:
 
               <application
                   android:allowBackup="false"
+                  android:supportsRtl="true"
                   android:icon="@drawable/ic_launcher"
                   android:label="Float Launcher"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:theme="@android:style/Theme.Material.NoActionBar">
 
                   <activity
                       android:name=".MainActivity"
@@ -139,123 +141,309 @@ jobs:
           </vector>
           FILE_EOF
           mkdir -p app/src/main/java/com/example/floatapp
+          cat > app/src/main/java/com/example/floatapp/GlassCircleView.kt << 'FILE_EOF'
+          package com.example.floatapp
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.RadialGradient
+          import android.graphics.Shader
+          import android.view.View
+
+          // دائرة زجاجية صغيرة: إما برمز نصي، أو بسهمي التكبير إذا كان الرمز فارغاً
+          class GlassCircleView(context: Context, private val glyph: String) : View(context) {
+
+              var active = false
+                  set(value) {
+                      field = value
+                      invalidate()
+                  }
+
+              private val d = resources.displayMetrics.density
+              private val base = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xB3101018.toInt() }
+              private val shine = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  style = Paint.Style.STROKE
+                  strokeWidth = 1.5f * d
+              }
+              private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.WHITE
+                  style = Paint.Style.STROKE
+                  strokeWidth = 2f * d
+                  strokeCap = Paint.Cap.ROUND
+                  strokeJoin = Paint.Join.ROUND
+              }
+              private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.WHITE
+                  textAlign = Paint.Align.CENTER
+              }
+
+              override fun onDraw(c: Canvas) {
+                  val cx = width / 2f
+                  val cy = height / 2f
+                  val r = minOf(width, height) / 2f - 2f * d
+
+                  c.drawCircle(cx, cy, r, base)
+                  shine.shader = RadialGradient(
+                      cx - r * 0.4f, cy - r * 0.5f, r * 1.3f,
+                      0x66FFFFFF, 0x05FFFFFF, Shader.TileMode.CLAMP
+                  )
+                  c.drawCircle(cx, cy, r, shine)
+                  ring.color = if (active) 0xFF4ADE80.toInt() else 0xAAFFFFFF.toInt()
+                  c.drawCircle(cx, cy, r, ring)
+
+                  if (glyph.isEmpty()) {
+                      val a = r * 0.38f
+                      val h = r * 0.34f
+                      val path = Path()
+                      path.moveTo(cx - a, cy - a)
+                      path.lineTo(cx + a, cy + a)
+                      path.moveTo(cx + a - h, cy + a)
+                      path.lineTo(cx + a, cy + a)
+                      path.lineTo(cx + a, cy + a - h)
+                      path.moveTo(cx - a + h, cy - a)
+                      path.lineTo(cx - a, cy - a)
+                      path.lineTo(cx - a, cy - a + h)
+                      c.drawPath(path, ink)
+                  } else {
+                      txt.textSize = r * 0.95f
+                      val y = cy - (txt.descent() + txt.ascent()) / 2f
+                      c.drawText(glyph, cx, y, txt)
+                  }
+              }
+          }
+          FILE_EOF
+          mkdir -p app/src/main/java/com/example/floatapp
           cat > app/src/main/java/com/example/floatapp/MainActivity.kt << 'FILE_EOF'
           package com.example.floatapp
 
           import android.Manifest
           import android.app.Activity
           import android.app.AlertDialog
-          import android.content.Context
           import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.RippleDrawable
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
           import android.view.Gravity
+          import android.view.View
           import android.widget.*
 
           class MainActivity : Activity() {
 
-              private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE) }
-              private lateinit var appLabel: TextView
-              private lateinit var sizeLabel: TextView
-              private lateinit var winLabel: TextView
+              private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, MODE_PRIVATE) }
+              private lateinit var siteValue: TextView
+              private lateinit var sizeValue: TextView
+              private lateinit var winValue: TextView
+              private lateinit var status: TextView
+
+              private val cyan = 0xFF22D3EE.toInt()
+              private val violet = 0xFFA78BFA.toInt()
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              // خلفية زجاجية: تدرج أبيض شفاف + حد رفيع
+              private fun glass(radius: Int = 22) = GradientDrawable(
+                  GradientDrawable.Orientation.TL_BR, intArrayOf(0x33FFFFFF, 0x0DFFFFFF)
+              ).apply {
+                  cornerRadius = dp(radius).toFloat()
+                  setStroke(dp(1), 0x40FFFFFF)
+              }
+
+              private fun ripple(bg: GradientDrawable) =
+                  RippleDrawable(ColorStateList.valueOf(0x44FFFFFF), bg, null)
+
+              private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+                  text = t
+                  textSize = size
+                  setTextColor(color)
+                  textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+                  if (bold) typeface = Typeface.DEFAULT_BOLD
+              }
+
+              private fun card(vararg children: View) = LinearLayout(this).apply {
+                  orientation = LinearLayout.VERTICAL
+                  setPadding(dp(18), dp(16), dp(18), dp(18))
+                  background = glass()
+                  children.forEach { addView(it) }
+              }
+
+              private fun gap(h: Int) = View(this).apply {
+                  layoutParams = LinearLayout.LayoutParams(1, dp(h))
+              }
+
+              private fun seek(max: Int, start: Int, onChange: (Int) -> Unit, onStop: (Int) -> Unit) =
+                  SeekBar(this).apply {
+                      layoutDirection = View.LAYOUT_DIRECTION_LTR
+                      this.max = max
+                      progress = start
+                      progressTintList = ColorStateList.valueOf(cyan)
+                      thumbTintList = ColorStateList.valueOf(violet)
+                      progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) = onChange(p)
+                          override fun onStartTrackingTouch(s: SeekBar) {}
+                          override fun onStopTrackingTouch(s: SeekBar) = onStop(s.progress)
+                      })
+                  }
+
+              private fun primaryButton(label: String, onClick: () -> Unit) = Button(this).apply {
+                  text = label
+                  isAllCaps = false
+                  textSize = 16f
+                  typeface = Typeface.DEFAULT_BOLD
+                  setTextColor(Color.WHITE)
+                  stateListAnimator = null
+                  background = ripple(
+                      GradientDrawable(
+                          GradientDrawable.Orientation.LEFT_RIGHT,
+                          intArrayOf(0xFF0EA5E9.toInt(), 0xFF8B5CF6.toInt())
+                      ).apply { cornerRadius = dp(18).toFloat() }
+                  )
+                  setOnClickListener { onClick() }
+              }
+
+              private fun glassButton(label: String, onClick: () -> Unit) = Button(this).apply {
+                  text = label
+                  isAllCaps = false
+                  textSize = 15f
+                  setTextColor(Color.WHITE)
+                  stateListAnimator = null
+                  background = ripple(glass(18))
+                  setOnClickListener { onClick() }
+              }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  window.statusBarColor = 0xFF070B1A.toInt()
+                  window.navigationBarColor = 0xFF0A2233.toInt()
 
-                  val pad = (20 * resources.displayMetrics.density).toInt()
-                  val root = LinearLayout(this).apply {
+                  siteValue = text("", 22f, Color.WHITE, true)
+                  sizeValue = text("", 15f, 0xCCFFFFFF.toInt())
+                  winValue = text("", 15f, 0xCCFFFFFF.toInt())
+                  status = text("", 13f, 0xFFFFFFFF.toInt()).apply {
+                      setPadding(dp(14), dp(6), dp(14), dp(6))
+                      background = glass(30)
+                  }
+
+                  val iconSeek = seek(
+                      110, prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE) - 40,
+                      onChange = { p ->
+                          sizeValue.text = "حجم الأيقونة: ${p + 40} dp"
+                          FloatingService.instance?.setSize(p + 40)
+                      },
+                      onStop = { p -> prefs.edit().putInt(FloatingService.KEY_SIZE, p + 40).apply() }
+                  )
+                  val winSeek = seek(
+                      70, prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30,
+                      onChange = { p ->
+                          winValue.text = "حجم النافذة: ${p + 30}% من الشاشة"
+                          FloatingService.instance?.setWindowPercent(p + 30)
+                      },
+                      onStop = { p -> prefs.edit().putInt(FloatingService.KEY_WIN, p + 30).apply() }
+                  )
+
+                  val content = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(pad, pad * 2, pad, pad)
-                      gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(dp(20), dp(56), dp(20), dp(28))
                   }
+                  content.addView(text("Float Launcher", 30f, Color.WHITE, true))
+                  content.addView(text("نافذة عائمة فوق أي لعبة", 14f, 0xB3FFFFFF.toInt()))
+                  content.addView(gap(14))
+                  content.addView(status, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                  ).apply { gravity = Gravity.START })
+                  content.addView(gap(18))
 
-                  appLabel = TextView(this).apply { textSize = 18f }
-                  val pickBtn = Button(this).apply {
-                      text = "اختر التطبيق"
-                      setOnClickListener { pickApp() }
-                  }
+                  content.addView(card(
+                      text("الموقع", 13f, 0x99FFFFFF.toInt()),
+                      siteValue,
+                      gap(10),
+                      glassButton("اختر الموقع") { pickSite() }
+                  ))
+                  content.addView(gap(14))
+                  content.addView(card(sizeValue, gap(6), iconSeek))
+                  content.addView(gap(14))
+                  content.addView(card(winValue, gap(6), winSeek))
+                  content.addView(gap(22))
 
-                  sizeLabel = TextView(this).apply { textSize = 16f }
-                  val seek = SeekBar(this).apply {
-                      max = 110 // من 40 إلى 150 dp
-                      progress = prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE) - 40
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
-                              sizeLabel.text = "حجم الأيقونة: ${p + 40} dp"
-                              FloatingService.instance?.setSize(p + 40)
-                          }
-                          override fun onStartTrackingTouch(s: SeekBar) {}
-                          override fun onStopTrackingTouch(s: SeekBar) {
-                              prefs.edit().putInt(FloatingService.KEY_SIZE, s.progress + 40).apply()
-                          }
-                      })
-                  }
+                  content.addView(primaryButton("تشغيل الأيقونة العائمة") { startFloating() },
+                      LinearLayout.LayoutParams(-1, dp(54)))
+                  content.addView(gap(10))
+                  content.addView(glassButton("إيقاف") {
+                      stopService(Intent(this, FloatingService::class.java))
+                      refreshStatus()
+                  }, LinearLayout.LayoutParams(-1, dp(50)))
+                  content.addView(gap(18))
+                  content.addView(text(
+                      "نصائح: اضغط مطولاً على دائرة التكبير لإظهار الأزرار • اضغط مطولاً على النافذة لتحريكها • اضغط 4 ثوان على الأيقونة لإغلاق التطبيق",
+                      12f, 0x99FFFFFF.toInt()
+                  ))
 
-                  winLabel = TextView(this).apply { textSize = 16f }
-                  val winSeek = SeekBar(this).apply {
-                      max = 70 // من 30% إلى 100% من الشاشة
-                      progress = prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
-                              winLabel.text = "حجم النافذة: ${p + 30}% من الشاشة"
-                          }
-                          override fun onStartTrackingTouch(s: SeekBar) {}
-                          override fun onStopTrackingTouch(s: SeekBar) {
-                              prefs.edit().putInt(FloatingService.KEY_WIN, s.progress + 30).apply()
-                          }
-                      })
+                  // خلفية متدرجة مع توهجات ملوّنة تعطي عمقاً للزجاج
+                  val root = FrameLayout(this).apply {
+                      layoutDirection = View.LAYOUT_DIRECTION_RTL
+                      background = GradientDrawable(
+                          GradientDrawable.Orientation.TL_BR,
+                          intArrayOf(0xFF070B1A.toInt(), 0xFF150F2E.toInt(), 0xFF0A2233.toInt())
+                      )
                   }
-
-                  val startBtn = Button(this).apply {
-                      text = "تشغيل الأيقونة العائمة"
-                      setOnClickListener { startFloating() }
-                  }
-                  val stopBtn = Button(this).apply {
-                      text = "إيقاف"
-                      setOnClickListener {
-                          stopService(Intent(this@MainActivity, FloatingService::class.java))
+                  fun blob(color: Int, g: Int, size: Int) = View(this).apply {
+                      background = GradientDrawable().apply {
+                          shape = GradientDrawable.OVAL
+                          gradientType = GradientDrawable.RADIAL_GRADIENT
+                          gradientRadius = dp(size / 2).toFloat()
+                          colors = intArrayOf(color, color and 0x00FFFFFF)
                       }
+                      layoutParams = FrameLayout.LayoutParams(dp(size), dp(size), g)
                   }
-
-                  listOf(appLabel, pickBtn, sizeLabel, seek, winLabel, winSeek, startBtn, stopBtn).forEach {
-                      root.addView(it, LinearLayout.LayoutParams(
-                          LinearLayout.LayoutParams.MATCH_PARENT,
-                          LinearLayout.LayoutParams.WRAP_CONTENT
-                      ).apply { topMargin = pad / 2 })
-                  }
+                  root.addView(blob(0x66A78BFA, Gravity.TOP or Gravity.END, 340))
+                  root.addView(blob(0x5522D3EE, Gravity.BOTTOM or Gravity.START, 360))
+                  root.addView(ScrollView(this).apply {
+                      isFillViewport = true
+                      addView(content)
+                  })
                   setContentView(root)
-                  refreshLabels()
 
+                  refreshLabels()
                   if (Build.VERSION.SDK_INT >= 33) {
                       requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                   }
               }
 
-              private fun refreshLabels() {
-                  val pkg = prefs.getString(FloatingService.KEY_PKG, FloatingService.DEFAULT_PKG)!!
-                  val name = try {
-                      packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
-                  } catch (e: Exception) { pkg }
-                  appLabel.text = "التطبيق: $name"
-                  sizeLabel.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
-                  winLabel.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من الشاشة"
+              override fun onResume() {
+                  super.onResume()
+                  refreshStatus()
               }
 
-              private fun pickApp() {
-                  val pm = packageManager
-                  val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                  // نحمّل اسم كل تطبيق مرة واحدة فقط
-                  val apps = pm.queryIntentActivities(launcher, 0)
-                      .map { Pair(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
-                      .sortedBy { it.first.lowercase() }
+              private fun refreshStatus() {
+                  val on = FloatingService.instance != null
+                  status.text = if (on) "●  الخدمة تعمل" else "○  الخدمة متوقفة"
+                  status.setTextColor(if (on) 0xFF4ADE80.toInt() else 0xCCFFFFFF.toInt())
+              }
+
+              private fun refreshLabels() {
+                  val idx = prefs.getInt(FloatingService.KEY_SITE, 0).coerceIn(0, FloatingService.SITES.lastIndex)
+                  siteValue.text = FloatingService.SITES[idx].first
+                  sizeValue.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
+                  winValue.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من الشاشة"
+              }
+
+              private fun pickSite() {
                   AlertDialog.Builder(this)
-                      .setTitle("اختر التطبيق")
-                      .setItems(apps.map { it.first }.toTypedArray()) { _, i ->
-                          prefs.edit().putString(FloatingService.KEY_PKG, apps[i].second).apply()
+                      .setTitle("اختر الموقع")
+                      .setItems(FloatingService.SITES.map { it.first }.toTypedArray()) { _, i ->
+                          prefs.edit().putInt(FloatingService.KEY_SITE, i).apply()
                           refreshLabels()
-                          FloatingService.instance?.applyIcon()
+                          FloatingService.instance?.onSiteChanged()
                       }
                       .show()
               }
@@ -263,206 +451,4 @@ jobs:
               private fun startFloating() {
                   if (!Settings.canDrawOverlays(this)) {
                       Toast.makeText(this, "فعّل «العرض فوق التطبيقات الأخرى» ثم ارجع", Toast.LENGTH_LONG).show()
-                      startActivity(
-                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-                      )
-                      return
-                  }
-                  if (FloatingService.instance == null) {
-                      startForegroundService(Intent(this, FloatingService::class.java))
-                  }
-              }
-          }
-          FILE_EOF
-          mkdir -p app/src/main/java/com/example/floatapp
-          cat > app/src/main/java/com/example/floatapp/FloatingService.kt << 'FILE_EOF'
-          package com.example.floatapp
-
-          import android.app.*
-          import android.content.Context
-          import android.content.Intent
-          import android.graphics.PixelFormat
-          import android.graphics.Rect
-          import android.os.IBinder
-          import android.view.*
-          import android.widget.ImageView
-          import android.widget.Toast
-          import kotlin.math.abs
-
-          class FloatingService : Service() {
-
-              companion object {
-                  const val PREFS = "cfg"
-                  const val KEY_PKG = "pkg"
-                  const val KEY_SIZE = "size"
-                  const val DEFAULT_PKG = "com.instagram.android"
-                  const val DEFAULT_SIZE = 70 // dp
-                  const val KEY_WIN = "win"      // حجم النافذة كنسبة مئوية من الشاشة
-                  const val DEFAULT_WIN = 60
-
-                  // مرجع مباشر للخدمة لتحديث الحجم/الأيقونة بدون إرسال Intents متكررة
-                  @Volatile
-                  var instance: FloatingService? = null
-              }
-
-              private lateinit var wm: WindowManager
-              private lateinit var params: WindowManager.LayoutParams
-              private var bubble: ImageView? = null
-
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onCreate() {
-                  super.onCreate()
-                  instance = this
-                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  startForeground(1, buildNotification())
-                  createBubble()
-              }
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
-
-              private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-              private fun buildNotification(): Notification {
-                  val channelId = "float_channel"
-                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                  nm.createNotificationChannel(
-                      NotificationChannel(channelId, "Float Launcher", NotificationManager.IMPORTANCE_MIN)
-                  )
-                  return Notification.Builder(this, channelId)
-                      .setContentTitle("الأيقونة العائمة تعمل")
-                      .setSmallIcon(android.R.drawable.ic_menu_view)
-                      .build()
-              }
-
-              private fun createBubble() {
-                  val size = dp(prefs().getInt(KEY_SIZE, DEFAULT_SIZE))
-                  params = WindowManager.LayoutParams(
-                      size, size,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                      PixelFormat.TRANSLUCENT
-                  ).apply {
-                      gravity = Gravity.TOP or Gravity.START
-                      x = 20
-                      y = 300
-                  }
-
-                  val view = ImageView(this).apply {
-                      scaleType = ImageView.ScaleType.FIT_CENTER
-                      alpha = 0.9f
-                  }
-
-                  view.setOnTouchListener(object : View.OnTouchListener {
-                      var startX = 0
-                      var startY = 0
-                      var touchX = 0f
-                      var touchY = 0f
-                      var moved = false
-
-                      override fun onTouch(v: View, e: MotionEvent): Boolean {
-                          when (e.action) {
-                              MotionEvent.ACTION_DOWN -> {
-                                  startX = params.x; startY = params.y
-                                  touchX = e.rawX; touchY = e.rawY
-                                  moved = false
-                              }
-                              MotionEvent.ACTION_MOVE -> {
-                                  val dx = e.rawX - touchX
-                                  val dy = e.rawY - touchY
-                                  if (abs(dx) > 10 || abs(dy) > 10) moved = true
-                                  if (moved) {
-                                      params.x = startX + dx.toInt()
-                                      params.y = startY + dy.toInt()
-                                      wm.updateViewLayout(v, params)
-                                  }
-                              }
-                              MotionEvent.ACTION_UP -> if (!moved) launchTarget()
-                          }
-                          return true
-                      }
-                  })
-
-                  bubble = view
-                  wm.addView(view, params)
-                  applyIcon()
-              }
-
-              // تحديث الحجم فقط (خفيف جداً، يُستدعى أثناء تحريك الشريط)
-              fun setSize(sizeDp: Int) {
-                  val view = bubble ?: return
-                  val px = dp(sizeDp)
-                  params.width = px
-                  params.height = px
-                  wm.updateViewLayout(view, params)
-              }
-
-              // تحميل الأيقونة مرة واحدة فقط عند تغيير التطبيق
-              fun applyIcon() {
-                  val view = bubble ?: return
-                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
-                  try {
-                      view.setImageDrawable(packageManager.getApplicationIcon(pkg))
-                  } catch (e: Exception) {
-                      view.setImageResource(android.R.drawable.sym_def_app_icon)
-                  }
-              }
-
-              private fun launchTarget() {
-                  val pkg = prefs().getString(KEY_PKG, DEFAULT_PKG)!!
-                  val intent = packageManager.getLaunchIntentForPackage(pkg)
-                  if (intent == null) {
-                      Toast.makeText(this, "التطبيق غير مثبّت", Toast.LENGTH_SHORT).show()
-                      return
-                  }
-                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-                  // نافذة حرة بحجم تختاره (نسبة من الشاشة)، تعمل فقط إذا كان وضع Freeform مدعوماً
-                  val dm = resources.displayMetrics
-                  val pct = prefs().getInt(KEY_WIN, DEFAULT_WIN) / 100f
-                  val w = (dm.widthPixels * pct).toInt()
-                  val h = (dm.heightPixels * pct).toInt()
-                  val left = (dm.widthPixels - w) / 2
-                  val top = ((dm.heightPixels - h) * 0.15f).toInt()
-                  val options = ActivityOptions.makeBasic()
-                  options.setLaunchBounds(Rect(left, top, left + w, top + h))
-                  // محاولة إضافية لفرض وضع النافذة الحرة (قد لا تتوفر في بعض الأنظمة)
-                  try {
-                      ActivityOptions::class.java
-                          .getMethod("setLaunchWindowingMode", Int::class.javaPrimitiveType)
-                          .invoke(options, 5)
-                  } catch (e: Throwable) { }
-
-                  try {
-                      startActivity(intent, options.toBundle())
-                  } catch (e: Exception) {
-                      startActivity(intent)
-                  }
-              }
-
-              override fun onDestroy() {
-                  bubble?.let { wm.removeView(it) }
-                  bubble = null
-                  instance = null
-                  super.onDestroy()
-              }
-          }
-          FILE_EOF
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.2'
-
-      - name: Build release APK
-        run: gradle assembleRelease --no-daemon
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: FloatLauncher-APK
-          path: app/build/outputs/apk/release/app-release.apk
+   
