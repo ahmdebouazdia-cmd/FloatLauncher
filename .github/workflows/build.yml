@@ -13,7 +13,7 @@ jobs:
 
       - name: Check source files
         run: |
-          for f in GlassViews Controls FloatingService MainActivity; do
+          for f in GlassViews UiKit Controls FloatingService MainActivity; do
             test -f app/src/main/java/com/example/floatapp/$f.kt || (echo "Missing file: $f.kt" && exit 1)
           done
 
@@ -305,7 +305,7 @@ jobs:
               (t.web.parent as? ViewGroup)?.removeView(t.web)
               t.web.destroy()
               if (tabs.isEmpty()) {
-                  closeWindow()
+                  closeWindowAnimated()
                   return
               }
               if (i < current) current -= 1
