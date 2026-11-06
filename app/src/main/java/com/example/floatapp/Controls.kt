@@ -1,21 +1,25 @@
 package com.example.floatapp
 
 import android.annotation.SuppressLint
-import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.RadialGradient
-import android.graphics.Shader
-import android.view.*
+import android.graphics.drawable.Drawable
+import android.os.SystemClock
+import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import android.view.WindowManager
+import android.view.animation.OvershootInterpolator
+import android.webkit.WebView
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
-internal fun FloatingService.circleParams(size: Int) = WindowManager.LayoutParams(
-    size, size,
+// ============ نوافذ صغيرة عائمة: القرط، الأزرار، شريط التطبيقات ============
+
+internal fun FloatingService.circleParams(w: Int, h: Int) = WindowManager.LayoutParams(
+    w, h,
     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
     PixelFormat.TRANSLUCENT
@@ -23,21 +27,22 @@ internal fun FloatingService.circleParams(size: Int) = WindowManager.LayoutParam
 
 internal fun FloatingService.ensureCircles() {
     if (handleView != null) return
-    handleParams = circleParams(dp(34))
-    handleView = GlassCircleView(this, "").also { attachHandleTouch(it) }
+    handleParams = circleParams(dp(44), dp(44))
+    handleView = EarringView(this).also { attachHandleTouch(it) }
 
-    val defs: List<Pair<String, () -> Unit>> = listOf(
-        "◀" to { goBack() },
-        "⌨" to { toggleKeyboard(); scheduleHide() },
-        "—" to { hideWindow() },
-        "✕" to { closeWindow() }
+    val defs: List<Pair<Int, () -> Unit>> = listOf(
+        GlassCircleView.BACK to { goBack() },
+        GlassCircleView.KEYBOARD to { toggleKeyboard(); scheduleHide() },
+        GlassCircleView.TABS to { closeMenu(); showDock(false) },
+        GlassCircleView.MINUS to { hideWindow() },
+        GlassCircleView.CLOSE to { closeWindow() }
     )
-    for ((glyph, action) in defs) {
-        val v = GlassCircleView(this, glyph)
+    for ((icon, action) in defs) {
+        val v = GlassCircleView(this, icon)
         v.setOnClickListener { action() }
-        if (glyph == "⌨") kbAction = v
+        if (icon == GlassCircleView.KEYBOARD) kbAction = v
         actionViews.add(v)
-        actionParams.add(circleParams(dp(36)))
+        actionParams.add(circleParams(dp(42), dp(42)))
     }
 }
 
@@ -56,34 +61,42 @@ internal fun FloatingService.showHandle() {
         wm.addView(hv, hp)
         handleAttached = true
         hv.alpha = 0f
-        hv.animate().alpha(1f).setDuration(180).start()
+        hv.scaleX = 0.5f
+        hv.scaleY = 0.5f
+        hv.animate().alpha(1f).scaleX(1f).scaleY(1f)
+            .setStartDelay(0).setDuration(260)
+            .setInterpolator(OvershootInterpolator(1.4f)).start()
     }
     scheduleHide()
 }
 
+// مسمار القرط على زاوية النافذة السفلية اليمنى تماماً
 internal fun FloatingService.layoutHandle() {
     val wp = winParams ?: return
     val hp = handleParams ?: return
     val dm = resources.displayMetrics
     val hs = hp.width
-    hp.x = (wp.x + wp.width - hs / 2 + dp(2)).coerceIn(0, dm.widthPixels - hs)
-    hp.y = (wp.y + wp.height - hs / 2 + dp(2)).coerceIn(0, dm.heightPixels - hs)
+    hp.x = (wp.x + wp.width - dp(9)).coerceIn(0, maxOf(0, dm.widthPixels - hs))
+    hp.y = (wp.y + wp.height - dp(9)).coerceIn(0, maxOf(0, dm.heightPixels - hs))
     if (handleAttached) handleView?.let { wm.updateViewLayout(it, hp) }
     if (menuOpen) layoutMenu()
+    if (dockAttached) layoutDock()
 }
 
+// الأزرار على قوس قريب ومائل حول القرط
 internal fun FloatingService.layoutMenu() {
     val hp = handleParams ?: return
     val dm = resources.displayMetrics
-    val cx = hp.x + hp.width / 2f
-    val cy = hp.y + hp.height / 2f
-    val radius = dp(80).toFloat()
-    for (i in actionViews.indices) {
+    val cx = hp.x + dp(26).toFloat()
+    val cy = hp.y + dp(26).toFloat()
+    val radius = dp(56).toFloat()
+    val n = actionViews.size
+    for (i in 0 until n) {
         val ap = actionParams[i]
-        val ang = Math.toRadians((180 + i * 30).toDouble())
+        val ang = Math.toRadians(225.0 + (i - (n - 1) / 2.0) * 40.0)
         val bs = ap.width
-        ap.x = (cx + radius * cos(ang) - bs / 2f).toInt().coerceIn(0, dm.widthPixels - bs)
-        ap.y = (cy + radius * sin(ang) - bs / 2f).toInt().coerceIn(0, dm.heightPixels - bs)
+        ap.x = (cx + radius * cos(ang) - bs / 2f).toInt().coerceIn(0, maxOf(0, dm.widthPixels - bs))
+        ap.y = (cy + radius * sin(ang) - bs / 2f).toInt().coerceIn(0, maxOf(0, dm.heightPixels - bs))
         if (menuOpen) wm.updateViewLayout(actionViews[i], ap)
     }
 }
@@ -91,15 +104,23 @@ internal fun FloatingService.layoutMenu() {
 internal fun FloatingService.openMenu() {
     if (menuOpen) return
     ensureCircles()
+    val hp = handleParams ?: return
+    hideDock()
     layoutMenu()
+    val cx = hp.x + dp(26)
+    val cy = hp.y + dp(26)
     for (i in actionViews.indices) {
         val v = actionViews[i]
-        wm.addView(v, actionParams[i])
+        val ap = actionParams[i]
+        wm.addView(v, ap)
         v.alpha = 0f
         v.scaleX = 0.3f
         v.scaleY = 0.3f
-        v.animate().alpha(1f).scaleX(1f).scaleY(1f)
-            .setStartDelay(i * 40L).setDuration(200).start()
+        v.translationX = (cx - (ap.x + ap.width / 2)).toFloat()
+        v.translationY = (cy - (ap.y + ap.height / 2)).toFloat()
+        v.animate().alpha(1f).scaleX(1f).scaleY(1f).translationX(0f).translationY(0f)
+            .setStartDelay(i * 35L).setDuration(280)
+            .setInterpolator(OvershootInterpolator(1.2f)).start()
     }
     menuOpen = true
     kbAction?.active = kbOn
@@ -112,29 +133,143 @@ internal fun FloatingService.closeMenu() {
     menuOpen = false
 }
 
+internal fun FloatingService.toggleMenu() {
+    if (menuOpen) closeMenu() else openMenu()
+}
+
 internal fun FloatingService.hideCircles() {
     ui.removeCallbacks(hideRunnable)
     closeMenu()
+    hideDock()
     if (handleAttached) {
         handleView?.let { wm.removeView(it) }
         handleAttached = false
     }
 }
 
+// ------------ شريط التطبيقات ------------
+
+internal fun FloatingService.dockItems(): List<DockItem> {
+    val pm = packageManager
+    fun iconOf(pkg: String): Drawable? = try {
+        pm.getApplicationIcon(pkg)
+    } catch (e: Exception) {
+        null
+    }
+    return if (!dockPicker) {
+        val list = tabs.mapIndexed { i, t ->
+            val s = FloatingService.SITES[t.site]
+            DockItem(iconOf(s.third), s.first.take(1), i == current, false)
+        }.toMutableList()
+        if (tabs.size < FloatingService.MAX_TABS) list.add(DockItem(null, "+", false, true))
+        list
+    } else {
+        FloatingService.SITES.map { DockItem(iconOf(it.third), it.first.take(1), false, false) }
+    }
+}
+
+internal fun FloatingService.ensureDock() {
+    if (dockView != null) return
+    dockParams = circleParams(dp(60), dp(56))
+    dockView = DockView(this).also { dv ->
+        dv.onTap = { i -> onDockTap(i) }
+        dv.onLong = { i -> onDockLong(i) }
+    }
+}
+
+internal fun FloatingService.refreshDock() {
+    val dv = dockView ?: return
+    val dpar = dockParams ?: return
+    val list = dockItems()
+    dv.items = list
+    dpar.width = dv.contentWidth(list.size)
+    dpar.height = dv.contentHeight()
+    if (dockAttached) wm.updateViewLayout(dv, dpar)
+}
+
+// فوق النافذة في الوسط، وإن لم يوجد مكان فتحتها
+internal fun FloatingService.layoutDock() {
+    val wp = winParams ?: return
+    val dpar = dockParams ?: return
+    val dm = resources.displayMetrics
+    val x = wp.x + (wp.width - dpar.width) / 2
+    var y = wp.y - dpar.height - dp(8)
+    if (y < dp(4)) y = wp.y + wp.height + dp(8)
+    dpar.x = x.coerceIn(0, maxOf(0, dm.widthPixels - dpar.width))
+    dpar.y = y.coerceIn(0, maxOf(0, dm.heightPixels - dpar.height))
+    if (dockAttached) dockView?.let { wm.updateViewLayout(it, dpar) }
+}
+
+internal fun FloatingService.showDock(picker: Boolean) {
+    if (!attached) return
+    ensureDock()
+    dockPicker = picker
+    refreshDock()
+    layoutDock()
+    val dv = dockView ?: return
+    val dpar = dockParams ?: return
+    if (!dockAttached) {
+        wm.addView(dv, dpar)
+        dockAttached = true
+        dv.alpha = 0f
+        dv.scaleX = 0.8f
+        dv.scaleY = 0.8f
+        dv.animate().alpha(1f).scaleX(1f).scaleY(1f)
+            .setStartDelay(0).setDuration(240)
+            .setInterpolator(OvershootInterpolator(1.1f)).start()
+    }
+    scheduleHide()
+}
+
+internal fun FloatingService.hideDock() {
+    if (dockAttached) {
+        dockView?.let { wm.removeView(it) }
+        dockAttached = false
+    }
+}
+
+internal fun FloatingService.onDockTap(i: Int) {
+    if (!dockPicker) {
+        if (i < tabs.size) {
+            switchTo(i)
+            refreshDock()
+        } else {
+            dockPicker = true
+            refreshDock()
+            layoutDock()
+        }
+    } else {
+        addTab(i)
+        dockPicker = false
+        refreshDock()
+        layoutDock()
+    }
+    scheduleHide()
+}
+
+internal fun FloatingService.onDockLong(i: Int) {
+    if (!dockPicker && i < tabs.size) {
+        closeTab(i)
+        if (windowView != null && dockAttached) {
+            refreshDock()
+            layoutDock()
+        }
+    }
+    if (windowView != null) scheduleHide()
+}
+
+// ------------ لمس القرط: ضغطة = الأزرار، سحب = تغيير الحجم (الزاوية السفلية ثابتة) ------------
+
 @SuppressLint("ClickableViewAccessibility")
 internal fun FloatingService.attachHandleTouch(h: View) {
     val slop = ViewConfiguration.get(this).scaledTouchSlop
     var rw = 0
     var rh = 0
+    var anchorR = 0
+    var anchorB = 0
     var tx = 0f
     var ty = 0f
     var moved = false
-    var menuTriggered = false
-    val menuRunnable = Runnable {
-        menuTriggered = true
-        h.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        openMenu()
-    }
     h.setOnTouchListener { _, e ->
         val p = winParams
         when (e.actionMasked) {
@@ -142,34 +277,41 @@ internal fun FloatingService.attachHandleTouch(h: View) {
                 if (p != null) {
                     rw = p.width
                     rh = p.height
+                    anchorR = p.x + p.width
+                    anchorB = p.y + p.height
                 }
                 tx = e.rawX
                 ty = e.rawY
                 moved = false
-                menuTriggered = false
                 ui.removeCallbacks(hideRunnable)
-                ui.postDelayed(menuRunnable, 450)
+                h.animate().scaleX(0.9f).scaleY(0.9f).setStartDelay(0).setDuration(90).start()
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!menuTriggered && p != null) {
+                if (p != null) {
                     val dx = e.rawX - tx
                     val dy = e.rawY - ty
-                    if (abs(dx) > slop || abs(dy) > slop) {
-                        moved = true
-                        ui.removeCallbacks(menuRunnable)
-                    }
+                    if (abs(dx) > slop || abs(dy) > slop) moved = true
                     if (moved) {
                         val dm = resources.displayMetrics
-                        p.width = (rw + dx).toInt().coerceIn(dp(150), dm.widthPixels)
-                        p.height = (rh + dy).toInt().coerceIn(dp(200), dm.heightPixels)
+                        val maxW = maxOf(minOf(anchorR, dm.widthPixels), dp(150))
+                        val maxH = maxOf(minOf(anchorB, dm.heightPixels), dp(200))
+                        val nw = (rw + dx).toInt().coerceIn(dp(150), maxW)
+                        val nh = (rh + dy).toInt().coerceIn(dp(200), maxH)
+                        p.width = nw
+                        p.height = nh
+                        p.x = anchorR - nw
+                        p.y = anchorB - nh
                         windowView?.let { if (attached) wm.updateViewLayout(it, p) }
                         layoutHandle()
                     }
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                ui.removeCallbacks(menuRunnable)
-                if (!moved && !menuTriggered && menuOpen) closeMenu()
+                h.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(160).start()
+                if (e.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                    h.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    toggleMenu()
+                }
                 scheduleHide()
             }
         }
@@ -177,65 +319,66 @@ internal fun FloatingService.attachHandleTouch(h: View) {
     }
 }
 
-// دائرة زجاجية صغيرة: إما برمز نصي، أو بسهمي التكبير إذا كان الرمز فارغاً
-class GlassCircleView(context: Context, private val glyph: String) : View(context) {
+// ------------ لمس النافذة: لمس مطوّل ثم سحب = تحريك النافذة ------------
 
-    var active = false
-        set(value) {
-            field = value
-            invalidate()
+@SuppressLint("ClickableViewAccessibility")
+internal fun FloatingService.attachWebTouch(web: WebView) {
+    val slop = ViewConfiguration.get(this).scaledTouchSlop
+    var downX = 0f
+    var downY = 0f
+    var lastX = 0f
+    var lastY = 0f
+    var sx = 0
+    var sy = 0
+    var dragging = false
+    val dragRunnable = Runnable {
+        val p = winParams ?: return@Runnable
+        dragging = true
+        sx = p.x
+        sy = p.y
+        downX = lastX
+        downY = lastY
+        val now = SystemClock.uptimeMillis()
+        val cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0f, 0f, 0)
+        web.onTouchEvent(cancel)
+        cancel.recycle()
+        web.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    }
+    web.setOnTouchListener { _, e ->
+        lastX = e.rawX
+        lastY = e.rawY
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = e.rawX
+                downY = e.rawY
+                dragging = false
+                showHandle()
+                ui.postDelayed(dragRunnable, 450)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (dragging) {
+                    val p = winParams
+                    val v = windowView
+                    if (p != null && v != null) {
+                        p.x = sx + (e.rawX - downX).toInt()
+                        p.y = sy + (e.rawY - downY).toInt()
+                        if (attached) wm.updateViewLayout(v, p)
+                        layoutHandle()
+                    }
+                } else if (abs(e.rawX - downX) > slop || abs(e.rawY - downY) > slop) {
+                    ui.removeCallbacks(dragRunnable)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                ui.removeCallbacks(dragRunnable)
+                val was = dragging
+                dragging = false
+                if (was) {
+                    scheduleHide()
+                    return@setOnTouchListener true
+                }
+            }
         }
-
-    private val d = resources.displayMetrics.density
-    private val base = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xB3101018.toInt() }
-    private val shine = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 1.5f * d
-    }
-    private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 2f * d
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textAlign = Paint.Align.CENTER
-    }
-
-    override fun onDraw(c: Canvas) {
-        val cx = width / 2f
-        val cy = height / 2f
-        val r = minOf(width, height) / 2f - 2f * d
-
-        c.drawCircle(cx, cy, r, base)
-        shine.shader = RadialGradient(
-            cx - r * 0.4f, cy - r * 0.5f, r * 1.3f,
-            0x66FFFFFF, 0x05FFFFFF, Shader.TileMode.CLAMP
-        )
-        c.drawCircle(cx, cy, r, shine)
-        ring.color = if (active) 0xFF4ADE80.toInt() else 0xAAFFFFFF.toInt()
-        c.drawCircle(cx, cy, r, ring)
-
-        if (glyph.isEmpty()) {
-            val a = r * 0.38f
-            val h = r * 0.34f
-            val path = Path()
-            path.moveTo(cx - a, cy - a)
-            path.lineTo(cx + a, cy + a)
-            path.moveTo(cx + a - h, cy + a)
-            path.lineTo(cx + a, cy + a)
-            path.lineTo(cx + a, cy + a - h)
-            path.moveTo(cx - a + h, cy - a)
-            path.lineTo(cx - a, cy - a)
-            path.lineTo(cx - a, cy - a + h)
-            c.drawPath(path, ink)
-        } else {
-            txt.textSize = r * 0.95f
-            val y = cy - (txt.descent() + txt.ascent()) / 2f
-            c.drawText(glyph, cx, y, txt)
-        }
+        dragging
     }
 }
