@@ -1,4 +1,4 @@
-name: Build APK (all-in-one)
+name: Build APK
 
 on:
   push:
@@ -13,8 +13,9 @@ jobs:
 
       - name: Check source files
         run: |
-          test -f app/src/main/java/com/example/floatapp/FloatingService.kt
-          test -f app/src/main/java/com/example/floatapp/Controls.kt
+          for f in GlassViews Controls FloatingService MainActivity; do
+            test -f app/src/main/java/com/example/floatapp/$f.kt || (echo "Missing file: $f.kt" && exit 1)
+          done
 
       - name: Generate project files
         run: |
@@ -146,250 +147,192 @@ jobs:
           </vector>
           FILE_EOF
           mkdir -p app/src/main/java/com/example/floatapp
-          cat > app/src/main/java/com/example/floatapp/MainActivity.kt << 'FILE_EOF'
+          cat > app/src/main/java/com/example/floatapp/Tabs.kt << 'FILE_EOF'
           package com.example.floatapp
 
-          import android.Manifest
-          import android.app.Activity
-          import android.app.AlertDialog
-          import android.content.Intent
-          import android.content.res.ColorStateList
+          import android.annotation.SuppressLint
           import android.graphics.Color
-          import android.graphics.Typeface
-          import android.graphics.drawable.GradientDrawable
-          import android.graphics.drawable.RippleDrawable
-          import android.net.Uri
           import android.os.Build
-          import android.os.Bundle
-          import android.provider.Settings
-          import android.view.Gravity
           import android.view.View
-          import android.widget.*
+          import android.view.ViewGroup
+          import android.webkit.CookieManager
+          import android.webkit.WebChromeClient
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.FrameLayout
+          import android.widget.Toast
 
-          class MainActivity : Activity() {
-
-              private val prefs by lazy { getSharedPreferences(FloatingService.PREFS, MODE_PRIVATE) }
-              private lateinit var siteValue: TextView
-              private lateinit var sizeValue: TextView
-              private lateinit var winValue: TextView
-              private lateinit var status: TextView
-
-              private val cyan = 0xFF22D3EE.toInt()
-              private val violet = 0xFFA78BFA.toInt()
-
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-              // خلفية زجاجية: تدرج أبيض شفاف + حد رفيع
-              private fun glass(radius: Int = 22) = GradientDrawable(
-                  GradientDrawable.Orientation.TL_BR, intArrayOf(0x33FFFFFF, 0x0DFFFFFF)
-              ).apply {
-                  cornerRadius = dp(radius).toFloat()
-                  setStroke(dp(1), 0x40FFFFFF)
+          // يجعل الصفحة تشبه التطبيقات + يخفي أزرار «Open app»
+          private const val APP_JS = """
+          (function(){
+            try{
+              var m=document.querySelector('meta[name=viewport]');
+              if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}
+              m.content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no';
+              if(!window.__fl){
+                window.__fl=1;
+                var s=document.createElement('style');
+                s.textContent='*{-webkit-tap-highlight-color:transparent!important}html,body{overscroll-behavior:none}::-webkit-scrollbar{display:none}';
+                document.head.appendChild(s);
+                var re=/open app|open in app|open instagram|use the app|get the app|فتح التطبيق|افتح التطبيق|استخدم التطبيق/i;
+                var hide=function(){
+          var list=document.querySelectorAll('a,button,div[role="button"]');
+          for(var i=0;i<list.length;i++){
+            var t=(list[i].innerText||'').trim();
+            if(t.length>0&&t.length<24&&re.test(t)){list[i].style.display='none';}
+          }
+                };
+                var timer=null;
+                var sched=function(){ if(timer) return; timer=setTimeout(function(){timer=null;hide();},400); };
+                hide();
+                new MutationObserver(sched).observe(document.documentElement,{childList:true,subtree:true});
               }
+            }catch(e){}
+          })();
+          """
 
-              private fun ripple(bg: GradientDrawable) =
-                  RippleDrawable(ColorStateList.valueOf(0x44FFFFFF), bg, null)
-
-              private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
-                  text = t
-                  textSize = size
-                  setTextColor(color)
-                  textAlignment = View.TEXT_ALIGNMENT_VIEW_START
-                  if (bold) typeface = Typeface.DEFAULT_BOLD
+          // عرض الصفحة المنطقي بين 320 و412 dp ثم تُكبَّر/تُصغَّر لتملأ النافذة بالضبط
+          internal fun FloatingService.fitWeb(web: WebView, cw: Int, ch: Int) {
+              if (cw <= 0 || ch <= 0) return
+              val d = resources.displayMetrics.density
+              val baseDp = (cw / d / 0.8f).coerceIn(320f, 412f)
+              val baseW = (baseDp * d).toInt()
+              val scale = cw.toFloat() / baseW
+              val newH = (ch / scale).toInt()
+              val lp = web.layoutParams
+              if (lp.width != baseW || lp.height != newH) {
+                  lp.width = baseW
+                  lp.height = newH
+                  web.layoutParams = lp
               }
+              web.pivotX = 0f
+              web.pivotY = 0f
+              web.scaleX = scale
+              web.scaleY = scale
+          }
 
-              private fun card(vararg children: View) = LinearLayout(this).apply {
-                  orientation = LinearLayout.VERTICAL
-                  setPadding(dp(18), dp(16), dp(18), dp(18))
-                  background = glass()
-                  children.forEach { addView(it) }
+          @Suppress("DEPRECATION")
+          private fun FloatingService.enableDark(s: WebSettings) {
+              if (Build.VERSION.SDK_INT >= 33) {
+                  s.isAlgorithmicDarkeningAllowed = true
+              } else if (Build.VERSION.SDK_INT >= 29) {
+                  s.forceDark = WebSettings.FORCE_DARK_ON
               }
+          }
 
-              private fun gap(h: Int) = View(this).apply {
-                  layoutParams = LinearLayout.LayoutParams(1, dp(h))
+
+          // ================= التبويبات (عدة تطبيقات) =================
+
+          internal fun FloatingService.activeWeb(): WebView? = tabs.getOrNull(current)?.web
+
+          @SuppressLint("SetJavaScriptEnabled")
+          private fun FloatingService.newWebView(site: Int): WebView {
+              val web = WebView(this)
+              web.setBackgroundColor(Color.BLACK)
+              val s = web.settings
+              s.javaScriptEnabled = true
+              s.domStorageEnabled = true
+              s.mediaPlaybackRequiresUserGesture = false
+              s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+              s.setSupportZoom(false)
+              s.builtInZoomControls = false
+              s.displayZoomControls = false
+              s.userAgentString = s.userAgentString.replace("; wv", "").replace("Version/4.0 ", "")
+              enableDark(s)
+              web.overScrollMode = View.OVER_SCROLL_NEVER
+              web.isVerticalScrollBarEnabled = false
+              web.isHorizontalScrollBarEnabled = false
+              CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
+              web.webViewClient = object : WebViewClient() {
+                  override fun onPageFinished(view: WebView?, url: String?) {
+                      view?.evaluateJavascript(APP_JS, null)
+                  }
               }
-
-              private fun seek(max: Int, start: Int, onChange: (Int) -> Unit, onStop: (Int) -> Unit) =
-                  SeekBar(this).apply {
-                      layoutDirection = View.LAYOUT_DIRECTION_LTR
-                      this.max = max
-                      progress = start
-                      progressTintList = ColorStateList.valueOf(cyan)
-                      thumbTintList = ColorStateList.valueOf(violet)
-                      progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
-                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) = onChange(p)
-                          override fun onStartTrackingTouch(s: SeekBar) {}
-                          override fun onStopTrackingTouch(s: SeekBar) = onStop(s.progress)
-                      })
+              // عرض الفيديو بملء النافذة (يوتيوب وغيره)
+              web.webChromeClient = object : WebChromeClient() {
+                  override fun onShowCustomView(view: View?, callback: WebChromeClient.CustomViewCallback?) {
+                      showCustom(view, callback)
                   }
 
-              private fun primaryButton(label: String, onClick: () -> Unit) = Button(this).apply {
-                  text = label
-                  isAllCaps = false
-                  textSize = 16f
-                  typeface = Typeface.DEFAULT_BOLD
-                  setTextColor(Color.WHITE)
-                  stateListAnimator = null
-                  background = ripple(
-                      GradientDrawable(
-                          GradientDrawable.Orientation.LEFT_RIGHT,
-                          intArrayOf(0xFF0EA5E9.toInt(), 0xFF8B5CF6.toInt())
-                      ).apply { cornerRadius = dp(18).toFloat() }
-                  )
-                  setOnClickListener { onClick() }
+                  override fun onHideCustomView() {
+                      hideCustom()
+                  }
               }
+              attachWebTouch(web)
+              web.loadUrl(FloatingService.SITES[site].second)
+              return web
+          }
 
-              private fun glassButton(label: String, onClick: () -> Unit) = Button(this).apply {
-                  text = label
-                  isAllCaps = false
-                  textSize = 15f
-                  setTextColor(Color.WHITE)
-                  stateListAnimator = null
-                  background = ripple(glass(18))
-                  setOnClickListener { onClick() }
+          internal fun FloatingService.addTab(site: Int) {
+              val box = contentBox ?: return
+              if (tabs.size >= FloatingService.MAX_TABS) {
+                  Toast.makeText(this, "الحد الأقصى ${FloatingService.MAX_TABS} تطبيقات", Toast.LENGTH_SHORT).show()
+                  return
               }
+              val web = newWebView(site)
+              web.visibility = View.GONE
+              box.addView(web, FrameLayout.LayoutParams(dp(360), 1))
+              tabs.add(Tab(site, web))
+              fitWeb(web, box.width, box.height)
+              switchTo(tabs.lastIndex)
+          }
 
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  window.statusBarColor = 0xFF070B1A.toInt()
-                  window.navigationBarColor = 0xFF0A2233.toInt()
-
-                  siteValue = text("", 22f, Color.WHITE, true)
-                  sizeValue = text("", 15f, 0xCCFFFFFF.toInt())
-                  winValue = text("", 15f, 0xCCFFFFFF.toInt())
-                  status = text("", 13f, 0xFFFFFFFF.toInt()).apply {
-                      setPadding(dp(14), dp(6), dp(14), dp(6))
-                      background = glass(30)
-                  }
-
-                  val iconSeek = seek(
-                      110, prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE) - 40,
-                      onChange = { p ->
-                          sizeValue.text = "حجم الأيقونة: ${p + 40} dp"
-                          FloatingService.instance?.setSize(p + 40)
-                      },
-                      onStop = { p -> prefs.edit().putInt(FloatingService.KEY_SIZE, p + 40).apply() }
-                  )
-                  val winSeek = seek(
-                      70, prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN) - 30,
-                      onChange = { p ->
-                          winValue.text = "حجم النافذة: ${p + 30}% من الشاشة"
-                          FloatingService.instance?.setWindowPercent(p + 30)
-                      },
-                      onStop = { p -> prefs.edit().putInt(FloatingService.KEY_WIN, p + 30).apply() }
-                  )
-
-                  val content = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(20), dp(56), dp(20), dp(28))
-                  }
-                  content.addView(text("Float Launcher", 30f, Color.WHITE, true))
-                  content.addView(text("نافذة عائمة فوق أي لعبة", 14f, 0xB3FFFFFF.toInt()))
-                  content.addView(gap(14))
-                  content.addView(status, LinearLayout.LayoutParams(
-                      LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
-                  ).apply { gravity = Gravity.START })
-                  content.addView(gap(18))
-
-                  content.addView(card(
-                      text("الموقع", 13f, 0x99FFFFFF.toInt()),
-                      siteValue,
-                      gap(10),
-                      glassButton("اختر الموقع") { pickSite() }
-                  ))
-                  content.addView(gap(14))
-                  content.addView(card(sizeValue, gap(6), iconSeek))
-                  content.addView(gap(14))
-                  content.addView(card(winValue, gap(6), winSeek))
-                  content.addView(gap(22))
-
-                  content.addView(primaryButton("تشغيل الأيقونة العائمة") { startFloating() },
-                      LinearLayout.LayoutParams(-1, dp(54)))
-                  content.addView(gap(10))
-                  content.addView(glassButton("إيقاف") {
-                      stopService(Intent(this, FloatingService::class.java))
-                      refreshStatus()
-                  }, LinearLayout.LayoutParams(-1, dp(50)))
-                  content.addView(gap(18))
-                  content.addView(text(
-                      "نصائح: اضغط مطولاً على دائرة التكبير لإظهار الأزرار • اضغط مطولاً على النافذة لتحريكها • اضغط 4 ثوان على الأيقونة لإغلاق التطبيق",
-                      12f, 0x99FFFFFF.toInt()
-                  ))
-
-                  // خلفية متدرجة مع توهجات ملوّنة تعطي عمقاً للزجاج
-                  val root = FrameLayout(this).apply {
-                      layoutDirection = View.LAYOUT_DIRECTION_RTL
-                      background = GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR,
-                          intArrayOf(0xFF070B1A.toInt(), 0xFF150F2E.toInt(), 0xFF0A2233.toInt())
-                      )
-                  }
-                  fun blob(color: Int, g: Int, size: Int) = View(this).apply {
-                      background = GradientDrawable().apply {
-                          shape = GradientDrawable.OVAL
-                          gradientType = GradientDrawable.RADIAL_GRADIENT
-                          gradientRadius = dp(size / 2).toFloat()
-                          colors = intArrayOf(color, color and 0x00FFFFFF)
+          internal fun FloatingService.switchTo(i: Int) {
+              if (i !in tabs.indices) return
+              hideCustom()
+              current = i
+              for ((idx, t) in tabs.withIndex()) {
+                  if (idx == i) {
+                      if (t.web.visibility != View.VISIBLE) {
+                          t.web.alpha = 0f
+                          t.web.visibility = View.VISIBLE
+                          t.web.animate().alpha(1f).setStartDelay(0).setDuration(180).start()
                       }
-                      layoutParams = FrameLayout.LayoutParams(dp(size), dp(size), g)
-                  }
-                  root.addView(blob(0x66A78BFA, Gravity.TOP or Gravity.END, 340))
-                  root.addView(blob(0x5522D3EE, Gravity.BOTTOM or Gravity.START, 360))
-                  root.addView(ScrollView(this).apply {
-                      isFillViewport = true
-                      addView(content)
-                  })
-                  setContentView(root)
-
-                  refreshLabels()
-                  if (Build.VERSION.SDK_INT >= 33) {
-                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                      t.web.onResume()
+                  } else {
+                      t.web.visibility = View.GONE
+                      t.web.onPause()
                   }
               }
+          }
 
-              override fun onResume() {
-                  super.onResume()
-                  refreshStatus()
+          internal fun FloatingService.closeTab(i: Int) {
+              if (i !in tabs.indices) return
+              if (i == current) hideCustom()
+              val t = tabs.removeAt(i)
+              t.web.stopLoading()
+              (t.web.parent as? ViewGroup)?.removeView(t.web)
+              t.web.destroy()
+              if (tabs.isEmpty()) {
+                  closeWindow()
+                  return
               }
+              if (i < current) current -= 1
+              current = current.coerceIn(0, tabs.lastIndex)
+              switchTo(current)
+          }
 
-              private fun refreshStatus() {
-                  val on = FloatingService.instance != null
-                  status.text = if (on) "●  الخدمة تعمل" else "○  الخدمة متوقفة"
-                  status.setTextColor(if (on) 0xFF4ADE80.toInt() else 0xCCFFFFFF.toInt())
-              }
+          // ================= الفيديو بملء النافذة =================
 
-              private fun refreshLabels() {
-                  val idx = prefs.getInt(FloatingService.KEY_SITE, 0).coerceIn(0, FloatingService.SITES.lastIndex)
-                  siteValue.text = FloatingService.SITES[idx].first
-                  sizeValue.text = "حجم الأيقونة: ${prefs.getInt(FloatingService.KEY_SIZE, FloatingService.DEFAULT_SIZE)} dp"
-                  winValue.text = "حجم النافذة: ${prefs.getInt(FloatingService.KEY_WIN, FloatingService.DEFAULT_WIN)}% من الشاشة"
+          internal fun FloatingService.showCustom(v: View?, cb: WebChromeClient.CustomViewCallback?) {
+              val box = contentBox
+              if (v == null || box == null || customView != null) {
+                  cb?.onCustomViewHidden()
+                  return
               }
+              customView = v
+              customCb = cb
+              v.setBackgroundColor(Color.BLACK)
+              box.addView(v, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+          }
 
-              private fun pickSite() {
-                  AlertDialog.Builder(this)
-                      .setTitle("اختر الموقع")
-                      .setItems(FloatingService.SITES.map { it.first }.toTypedArray()) { _, i ->
-                          prefs.edit().putInt(FloatingService.KEY_SITE, i).apply()
-                          refreshLabels()
-                          FloatingService.instance?.onSiteChanged()
-                      }
-                      .show()
-              }
-
-              private fun startFloating() {
-                  if (!Settings.canDrawOverlays(this)) {
-                      Toast.makeText(this, "فعّل «العرض فوق التطبيقات الأخرى» ثم ارجع", Toast.LENGTH_LONG).show()
-                      startActivity(
-                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-                      )
-                      return
-                  }
-                  if (FloatingService.instance == null) {
-                      startForegroundService(Intent(this, FloatingService::class.java))
-                  }
-                  window.decorView.postDelayed({ refreshStatus() }, 600)
-              }
+          internal fun FloatingService.hideCustom() {
+              val v = customView ?: return
+              (v.parent as? ViewGroup)?.removeView(v)
+              customCb?.onCustomViewHidden()
+              customView = null
+              customCb = null
           }
           FILE_EOF
 
