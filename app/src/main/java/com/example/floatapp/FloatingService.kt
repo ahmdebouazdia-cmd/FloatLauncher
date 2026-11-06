@@ -12,7 +12,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
+import android.animation.ValueAnimator
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -22,18 +22,16 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.view.animation.OvershootInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
-import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ImageView
-import android.widget.Toast
 import kotlin.math.abs
 
 class Tab(val site: Int, val web: WebView)
@@ -45,11 +43,11 @@ class FloatingService : Service() {
         const val KEY_SITE = "site"
         const val KEY_SIZE = "size"
         const val KEY_WIN = "win"
+        const val KEY_BUBBLE = "bubble"
         const val DEFAULT_SIZE = 70 // حجم الأيقونة dp
         const val DEFAULT_WIN = 70  // حجم النافذة % من الشاشة
         const val MAX_TABS = 4
 
-        // الاسم، الرابط، حزمة التطبيق (لعرض أيقونته إن كان مثبتاً)
         val SITES = listOf(
             Triple("Instagram", "https://www.instagram.com/", "com.instagram.android"),
             Triple("Facebook", "https://m.facebook.com/", "com.facebook.katana"),
@@ -71,13 +69,11 @@ class FloatingService : Service() {
     internal val ui = Handler(Looper.getMainLooper())
     internal lateinit var wm: WindowManager
 
-    // الأيقونة العائمة
     private lateinit var bubbleParams: WindowManager.LayoutParams
     private var bubble: ImageView? = null
     private var bubbleAttached = false
     private var dust: DustView? = null
 
-    // النافذة والتبويبات
     internal var winParams: WindowManager.LayoutParams? = null
     internal var windowView: FrameLayout? = null
     internal var contentBox: FrameLayout? = null
@@ -89,11 +85,13 @@ class FloatingService : Service() {
     internal var customView: View? = null
     internal var customCb: WebChromeClient.CustomViewCallback? = null
 
-    // القرط والأزرار وشريط التطبيقات (Controls.kt)
-    internal var handleView: EarringView? = null
+    internal var handleView: TabHandleView? = null
     internal var handleParams: WindowManager.LayoutParams? = null
     internal var handleAttached = false
+    internal var handleShown = false
+    internal var handleAnim: ValueAnimator? = null
     internal var menuOpen = false
+    internal var actionsAttached = false
     internal val actionViews = mutableListOf<GlassCircleView>()
     internal val actionParams = mutableListOf<WindowManager.LayoutParams>()
     internal var kbAction: GlassCircleView? = null
@@ -101,7 +99,9 @@ class FloatingService : Service() {
     internal var dockParams: WindowManager.LayoutParams? = null
     internal var dockAttached = false
     internal var dockPicker = false
-    internal val hideRunnable = Runnable { hideCircles() }
+    internal val hideRunnable = Runnable { softHideCircles() }
+    internal val menuRemoveRunnable = Runnable { removeActionsNow() }
+    internal val dockRemoveRunnable = Runnable { removeDockNow() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -131,9 +131,6 @@ class FloatingService : Service() {
             .build()
     }
 
-    // ================= الأيقونة العائمة =================
-
-    // سحب الأيقونة، ضغطة = فتح النافذة، ضغط مستمر ثانيتين = إغلاق التطبيق بتأثير الغبار
     @SuppressLint("ClickableViewAccessibility")
     private fun attachDrag(
         target: View,
@@ -218,7 +215,7 @@ class FloatingService : Service() {
         }
         val view = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
-            alpha = 0.92f
+            alpha = 0.95f
         }
         attachDrag(
             view, bubbleParams, view,
@@ -231,15 +228,16 @@ class FloatingService : Service() {
         showBubble()
     }
 
-    // الأيقونة تظهر بحركة نابضة وتختفي عند فتح النافذة
     private fun showBubble() {
         val v = bubble ?: return
+        if (!prefs().getBoolean(KEY_BUBBLE, true)) return
         if (!bubbleAttached) {
             wm.addView(v, bubbleParams)
             bubbleAttached = true
+            v.alpha = 0.95f
             v.scaleX = 0.4f
             v.scaleY = 0.4f
-            v.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(300)
+            v.animate().scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(320)
                 .setInterpolator(OvershootInterpolator(1.6f)).start()
         }
     }
@@ -253,6 +251,23 @@ class FloatingService : Service() {
         }
     }
 
+    private fun hideBubbleAnimated() {
+        val v = bubble ?: return
+        if (!bubbleAttached) return
+        v.animate().cancel()
+        v.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setStartDelay(0).setDuration(200)
+            .setInterpolator(AccelerateInterpolator())
+            .withEndAction { if (attached) hideBubble() }.start()
+    }
+
+    fun setBubbleEnabled(on: Boolean) {
+        if (on) {
+            if (!attached) showBubble()
+        } else {
+            hideBubble()
+        }
+    }
+
     fun setSize(sizeDp: Int) {
         val view = bubble ?: return
         val px = dp(sizeDp)
@@ -262,19 +277,13 @@ class FloatingService : Service() {
     }
 
     fun applyIcon() {
-        val view = bubble ?: return
-        try {
-            view.setImageDrawable(packageManager.getApplicationIcon(SITES[siteIndex()].third))
-        } catch (e: Exception) {
-            view.setImageResource(R.drawable.ic_launcher)
-        }
+        bubble?.setImageDrawable(SiteGlassDrawable(siteIndex()))
     }
 
     fun onSiteChanged() {
         applyIcon()
     }
 
-    // إغلاق التطبيق: الأيقونة تتحول إلى غبار يتلاشى
     private fun quitApp() {
         val v = bubble
         val d = v?.drawable
@@ -285,9 +294,8 @@ class FloatingService : Service() {
             return
         }
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val copy = d.constantState?.newDrawable()?.mutate() ?: d
-        copy.setBounds(0, 0, w, h)
-        copy.draw(Canvas(bmp))
+        d.setBounds(0, 0, w, h)
+        d.draw(Canvas(bmp))
         val m = dp(70)
         val dustParams = WindowManager.LayoutParams(
             w + 2 * m, h + 2 * m,
@@ -313,9 +321,6 @@ class FloatingService : Service() {
         }
     }
 
-    // ================= النافذة =================
-
-    // النافذة بنسبة الشاشة تقريباً ليتناسق المحتوى مع شكل الهاتف
     private fun windowSize(pct: Int): Pair<Int, Int> {
         val dm = resources.displayMetrics
         val w = (dm.widthPixels * pct / 100f).toInt()
@@ -327,8 +332,8 @@ class FloatingService : Service() {
         val p = winParams ?: return
         val v = windowView ?: return
         val (w, h) = windowSize(pct)
-        p.x = maxOf(0, p.x + p.width - w)
-        p.y = maxOf(0, p.y + p.height - h)
+        p.x = maxOf(0, p.x + (p.width - w) / 2)
+        p.y = maxOf(0, p.y + (p.height - h) / 2)
         p.width = w
         p.height = h
         if (attached) wm.updateViewLayout(v, p)
@@ -349,9 +354,14 @@ class FloatingService : Service() {
         v.pivotY = (bubbleParams.y + bubbleParams.height / 2f - p.y).coerceIn(0f, p.height.toFloat())
     }
 
-    private fun animateIn(v: View) {
-        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(280)
-            .setInterpolator(DecelerateInterpolator()).start()
+    private fun animateIn(v: View, afterEnd: () -> Unit) {
+        v.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setStartDelay(0).setDuration(360)
+            .setInterpolator(DecelerateInterpolator(1.8f))
+            .withEndAction {
+                v.setLayerType(View.LAYER_TYPE_NONE, null)
+                afterEnd()
+            }.start()
     }
 
     private fun createWindow() {
@@ -378,7 +388,7 @@ class FloatingService : Service() {
         root.foreground = GradientDrawable().apply {
             setColor(Color.TRANSPARENT)
             cornerRadius = dp(18).toFloat()
-            setStroke(dp(1), 0x55FFFFFF)
+            setStroke(dp(1), 0x66FFFFFF)
         }
 
         val box = FrameLayout(this)
@@ -392,16 +402,19 @@ class FloatingService : Service() {
         windowView = root
         contentBox = box
 
+        busy = true
         root.alpha = 0f
-        root.scaleX = 0.85f
-        root.scaleY = 0.85f
+        root.scaleX = 0.3f
+        root.scaleY = 0.3f
         pivotFromBubble(root, p)
         wm.addView(root, p)
         attached = true
-        addTab(siteIndex())
-        hideBubble()
-        animateIn(root)
-        showHandle()
+        hideBubbleAnimated()
+        animateIn(root) {
+            busy = false
+            if (tabs.isEmpty() && windowView === root) addTab(siteIndex())
+            showHandle()
+        }
     }
 
     internal fun hideWindow() {
@@ -412,12 +425,14 @@ class FloatingService : Service() {
         if (kbOn) toggleKeyboard()
         hideCircles()
         pivotFromBubble(v, p)
-        v.animate().alpha(0f).scaleX(0.85f).scaleY(0.85f).setStartDelay(0).setDuration(200)
-            .setInterpolator(DecelerateInterpolator())
+        v.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        v.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setStartDelay(0).setDuration(240)
+            .setInterpolator(AccelerateInterpolator())
             .withEndAction {
                 if (windowView === v && attached) {
                     wm.removeView(v)
                     attached = false
+                    v.setLayerType(View.LAYER_TYPE_NONE, null)
                     activeWeb()?.onPause()
                     busy = false
                     showBubble()
@@ -429,19 +444,38 @@ class FloatingService : Service() {
         val v = windowView ?: return
         val p = winParams ?: return
         if (attached || busy) return
+        busy = true
         v.alpha = 0f
-        v.scaleX = 0.85f
-        v.scaleY = 0.85f
+        v.scaleX = 0.3f
+        v.scaleY = 0.3f
         pivotFromBubble(v, p)
         wm.addView(v, p)
         attached = true
         activeWeb()?.onResume()
-        hideBubble()
-        animateIn(v)
-        showHandle()
+        hideBubbleAnimated()
+        animateIn(v) {
+            busy = false
+            showHandle()
+        }
     }
 
-    // إغلاق كامل وتحرير ذاكرة المتصفحات
+    internal fun closeWindowAnimated() {
+        val v = windowView
+        val p = winParams
+        if (v == null || p == null || !attached || busy) {
+            closeWindow()
+            return
+        }
+        busy = true
+        if (kbOn) toggleKeyboard()
+        hideCircles()
+        pivotFromBubble(v, p)
+        v.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        v.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setStartDelay(0).setDuration(260)
+            .setInterpolator(AccelerateInterpolator())
+            .withEndAction { if (windowView === v) closeWindow() }.start()
+    }
+
     internal fun closeWindow() {
         hideCircles()
         hideCustom()
@@ -467,8 +501,6 @@ class FloatingService : Service() {
         CookieManager.getInstance().flush()
         showBubble()
     }
-
-    // ================= الكتابة والرجوع =================
 
     internal fun toggleKeyboard() {
         val v = windowView ?: return
